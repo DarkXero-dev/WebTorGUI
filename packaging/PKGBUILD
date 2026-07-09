@@ -1,6 +1,6 @@
 # Maintainer: DarkXero <info@techxero.com>
 pkgname=webtorapp
-pkgver=0.1.7.pre
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Native premium desktop client for webtor.io"
 arch=('x86_64')

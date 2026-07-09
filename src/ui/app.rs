@@ -60,6 +60,7 @@ fn sample_clips() -> &'static [SampleClip] {
 /// One entry from a Discover catalog - same Stremio addon protocol
 /// webtor.io itself uses for its Discover page (Cinemeta by default, or any
 /// other installed addon).
+#[derive(Clone)]
 struct DiscoverEntry {
     id: String,
     name: String,
@@ -96,6 +97,7 @@ struct ManifestCatalog {
     id: String,
     label: String,
     genres: Vec<String>,
+    supports_search: bool,
 }
 
 /// A validated addon's manifest - fetched live from `{base_url}/manifest.json`,
@@ -151,7 +153,18 @@ async fn fetch_addon_manifest(base_url: &str) -> Result<AddonManifest, String> {
                         .and_then(|o| o.as_array())
                         .map(|arr| arr.iter().filter_map(|g| g.as_str().map(str::to_string)).collect::<Vec<_>>())
                         .unwrap_or_default();
-                    Some(ManifestCatalog { kind, id, label, genres })
+                    // Addons declare search support two different ways
+                    // depending on manifest schema version - a newer
+                    // `extra: [{"name": "search", ...}]` entry, or the
+                    // older flat `extraSupported: ["search", ...]` array.
+                    let supports_search = c
+                        .get("extra")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|extras| extras.iter().any(|e| e.get("name").and_then(|n| n.as_str()) == Some("search")))
+                        || c.get("extraSupported")
+                            .and_then(|v| v.as_array())
+                            .is_some_and(|extras| extras.iter().any(|e| e.as_str() == Some("search")));
+                    Some(ManifestCatalog { kind, id, label, genres, supports_search })
                 })
                 .collect::<Vec<_>>()
         })
@@ -199,8 +212,11 @@ async fn fetch_addon_store() -> Result<Vec<StoreAddon>, String> {
     Ok(addons)
 }
 
-fn build_catalog_url(base_url: &str, kind: &str, catalog_id: &str, genre: Option<&str>, skip: usize) -> String {
+fn build_catalog_url(base_url: &str, kind: &str, catalog_id: &str, genre: Option<&str>, skip: usize, search: Option<&str>) -> String {
     let mut extras = Vec::new();
+    if let Some(q) = search {
+        extras.push(format!("search={}", percent_encoding::utf8_percent_encode(q, percent_encoding::NON_ALPHANUMERIC)));
+    }
     if let Some(g) = genre {
         extras.push(format!("genre={g}"));
     }
@@ -215,29 +231,72 @@ fn build_catalog_url(base_url: &str, kind: &str, catalog_id: &str, genre: Option
     }
 }
 
+async fn fetch_discover_catalog_entries(url: &str) -> Result<Vec<DiscoverEntry>, String> {
+    let resp = reqwest::get(url).await.map_err(|e| format!("network error: {e}"))?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("bad response: {e}"))?;
+    let metas = json
+        .get("metas")
+        .and_then(|m| m.as_array())
+        .ok_or_else(|| "unexpected response shape".to_string())?;
+    let entries = metas
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            let name = m.get("name")?.as_str()?.to_string();
+            let poster = m.get("poster")?.as_str()?.to_string();
+            let year = m.get("year").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let imdb_rating = m.get("imdbRating").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some(DiscoverEntry { id, name, poster, year, imdb_rating })
+        })
+        .collect::<Vec<_>>();
+    Ok(entries)
+}
+
 async fn fetch_discover_catalog(tx: std::sync::mpsc::Sender<Result<Vec<DiscoverEntry>, String>>, url: String) {
-    let result = async {
-        let resp = reqwest::get(&url).await.map_err(|e| format!("network error: {e}"))?;
-        let json: serde_json::Value = resp.json().await.map_err(|e| format!("bad response: {e}"))?;
-        let metas = json
-            .get("metas")
-            .and_then(|m| m.as_array())
-            .ok_or_else(|| "unexpected response shape".to_string())?;
-        let entries = metas
-            .iter()
-            .filter_map(|m| {
-                let id = m.get("id")?.as_str()?.to_string();
-                let name = m.get("name")?.as_str()?.to_string();
-                let poster = m.get("poster")?.as_str()?.to_string();
-                let year = m.get("year").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let imdb_rating = m.get("imdbRating").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                Some(DiscoverEntry { id, name, poster, year, imdb_rating })
-            })
-            .collect::<Vec<_>>();
-        Ok(entries)
+    let _ = tx.send(fetch_discover_catalog_entries(&url).await);
+}
+
+/// Searches every installed Discover addon at once (not just the currently
+/// selected one) - for each, fetches its manifest fresh, picks the first
+/// catalog of `kind` that declares search support, and queries it. Results
+/// are merged and deduped by id; addons with no search-capable catalog for
+/// this `kind` are silently skipped (not every addon supports search).
+async fn search_all_discover_addons(addons: Vec<AddonSource>, kind: String, query: String) -> Result<Vec<DiscoverEntry>, String> {
+    let mut results = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut any_searchable = false;
+    let mut last_err = String::new();
+    for addon in addons {
+        let manifest = match fetch_addon_manifest(&addon.base_url).await {
+            Ok(m) => m,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        let Some(catalog) = manifest.catalogs.iter().find(|c| c.kind == kind && c.supports_search) else {
+            continue;
+        };
+        any_searchable = true;
+        let url = build_catalog_url(&addon.base_url, &kind, &catalog.id, None, 0, Some(&query));
+        match fetch_discover_catalog_entries(&url).await {
+            Ok(entries) => {
+                for entry in entries {
+                    if seen_ids.insert(entry.id.clone()) {
+                        results.push(entry);
+                    }
+                }
+            }
+            Err(e) => last_err = e,
+        }
     }
-    .await;
-    let _ = tx.send(result);
+    if !any_searchable {
+        return Err("None of your installed sources support search.".to_string());
+    }
+    if results.is_empty() && !last_err.is_empty() {
+        return Err(last_err);
+    }
+    Ok(results)
 }
 
 /// One real torrent/stream option resolved by a stream addon (e.g. Torrentio)
@@ -365,6 +424,17 @@ fn known_source_label(s: &str) -> &'static str {
         "Stream source" => "Stream source",
         "Uploaded .torrent" => "Uploaded .torrent",
         _ => "Restored",
+    }
+}
+
+/// A long torrent title in an `egui::Window`'s title bar stretches the
+/// whole window wider than its body's explicit width - the title bar isn't
+/// bound by `set_max_width`/`set_width` the way content is.
+fn truncate_title(title: &str, max_chars: usize) -> String {
+    if title.chars().count() > max_chars {
+        format!("{}...", title.chars().take(max_chars).collect::<String>())
+    } else {
+        title.to_string()
     }
 }
 
@@ -590,6 +660,15 @@ pub struct WebtorApp {
     discover_manifest_loading: bool,
     discover_manifest_error: Option<String>,
 
+    discover_search_input: String,
+    /// `None` = normal catalog browsing; `Some(_)` = showing search
+    /// results instead (searched across every installed Discover addon,
+    /// not just the currently selected one).
+    discover_search_results: Option<Vec<DiscoverEntry>>,
+    discover_search_rx: Option<Receiver<Result<Vec<DiscoverEntry>, String>>>,
+    discover_search_loading: bool,
+    discover_search_error: Option<String>,
+
     new_addon_url: String,
     addon_install_rx: Option<Receiver<Result<(String, AddonManifest), String>>>,
     addon_install_loading: bool,
@@ -735,6 +814,11 @@ impl WebtorApp {
             discover_manifest_rx: None,
             discover_manifest_loading: false,
             discover_manifest_error: None,
+            discover_search_input: String::new(),
+            discover_search_results: None,
+            discover_search_rx: None,
+            discover_search_loading: false,
+            discover_search_error: None,
             new_addon_url: String::new(),
             addon_install_rx: None,
             addon_install_loading: false,
@@ -1164,13 +1248,39 @@ impl WebtorApp {
     }
 
     fn trigger_discover_fetch(&mut self, base_url: &str) {
-        let url = build_catalog_url(base_url, self.discover_type.as_str(), &self.discover_catalog_id, self.discover_genre.as_deref(), self.discover_skip);
+        let url = build_catalog_url(base_url, self.discover_type.as_str(), &self.discover_catalog_id, self.discover_genre.as_deref(), self.discover_skip, None);
         let (tx, rx) = std::sync::mpsc::channel();
         tokio::spawn(fetch_discover_catalog(tx, url));
         self.discover_rx = Some(rx);
         self.discover_loading = true;
         self.discover_error = None;
         self.discover_catalog.clear();
+    }
+
+    fn trigger_discover_search(&mut self) {
+        let query = self.discover_search_input.trim().to_string();
+        if query.is_empty() {
+            self.clear_discover_search();
+            return;
+        }
+        let addons = self.settings.lock().unwrap().discover_addons.clone();
+        let kind = self.discover_type.as_str().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            let _ = tx.send(search_all_discover_addons(addons, kind, query).await);
+        });
+        self.discover_search_rx = Some(rx);
+        self.discover_search_loading = true;
+        self.discover_search_error = None;
+        self.discover_search_results = None;
+    }
+
+    fn clear_discover_search(&mut self) {
+        self.discover_search_input.clear();
+        self.discover_search_results = None;
+        self.discover_search_rx = None;
+        self.discover_search_loading = false;
+        self.discover_search_error = None;
     }
 
     fn discover_page(&mut self, ui: &mut Ui) {
@@ -1245,6 +1355,7 @@ impl WebtorApp {
                     self.discover_type = DiscoverType::Movie;
                     self.discover_genre = None;
                     self.discover_catalog_id.clear();
+                    self.clear_discover_search();
                     filters_changed = true;
                 }
                 if ui.selectable_label(self.discover_type == DiscoverType::Series, "TV Shows").clicked()
@@ -1253,6 +1364,7 @@ impl WebtorApp {
                     self.discover_type = DiscoverType::Series;
                     self.discover_genre = None;
                     self.discover_catalog_id.clear();
+                    self.clear_discover_search();
                     filters_changed = true;
                 }
 
@@ -1310,6 +1422,34 @@ impl WebtorApp {
                     self.page = Page::AddOns;
                 }
 
+                // Fills whatever's left of THIS row (to the right of
+                // Manage Sources) - searches every installed Discover
+                // addon at once, not just the currently selected one.
+                // `available_width()` reports space until the outer
+                // container's boundary, not "what's left on the current
+                // line before wrapping" - that's `available_size_before_wrap`,
+                // which is what's needed here to actually stay on this row
+                // instead of overflowing onto a new one.
+                ui.separator();
+                let showing_search = self.discover_search_results.is_some() || self.discover_search_loading || self.discover_search_error.is_some();
+                let icon_btn_w = ui.spacing().button_padding.x * 2.0 + 18.0;
+                let reserved = icon_btn_w + ui.spacing().item_spacing.x + if showing_search { icon_btn_w + ui.spacing().item_spacing.x } else { 0.0 };
+                let text_w = (ui.available_size_before_wrap().x - reserved).max(80.0);
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.discover_search_input)
+                        .desired_width(text_w)
+                        .hint_text("Search all installed sources...")
+                        .text_color(super::theme::TEXT),
+                );
+                let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let search_clicked = ui.add(egui::Button::new(egui_phosphor::regular::MAGNIFYING_GLASS).fill(super::theme::PINK)).clicked();
+                if submitted || search_clicked {
+                    self.trigger_discover_search();
+                }
+                if showing_search && ui.button(egui_phosphor::regular::X).clicked() {
+                    self.clear_discover_search();
+                }
+
                 if filters_changed {
                     self.discover_skip = 0;
                     self.trigger_discover_fetch(&addon.base_url);
@@ -1317,6 +1457,53 @@ impl WebtorApp {
             });
         });
         ui.add_space(16.0);
+
+        if let Some(rx) = &self.discover_search_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(entries) => self.discover_search_results = Some(entries),
+                    Err(e) => self.discover_search_error = Some(e),
+                }
+                self.discover_search_loading = false;
+                self.discover_search_rx = None;
+            }
+        }
+
+        if self.discover_search_loading {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                ui.spinner();
+                ui.add_space(8.0);
+                ui.label(RichText::new("Searching all installed sources...").size(13.0).color(super::theme::MUTED));
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            return;
+        }
+
+        if let Some(err) = self.discover_search_error.clone() {
+            egui::Frame::new()
+                .fill(Color32::from_rgb(60, 20, 30))
+                .stroke(Stroke::new(1.0, super::theme::ERROR))
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(RichText::new(format!("Search failed: {err}")).size(13.0).color(super::theme::ERROR));
+                });
+            return;
+        }
+
+        if let Some(results) = self.discover_search_results.clone() {
+            if results.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(24.0);
+                    ui.label(RichText::new("No results found.").size(14.0).color(super::theme::MUTED));
+                });
+            } else {
+                self.render_discover_grid(ui, &results);
+            }
+            return;
+        }
 
         if self.discover_manifest_loading {
             ui.add_space(40.0);
@@ -1377,6 +1564,17 @@ impl WebtorApp {
             return;
         }
 
+        self.render_discover_grid(ui, &self.discover_catalog.clone());
+
+        ui.add_space(10.0);
+        self.discover_pagination_row(ui, &addon.base_url);
+    }
+
+    /// The poster grid shared by normal catalog browsing and search results -
+    /// takes `entries` directly rather than always reading `self.discover_catalog`
+    /// so search results (merged from every installed addon, not paginated)
+    /// can reuse the exact same rendering.
+    fn render_discover_grid(&mut self, ui: &mut Ui, entries: &[DiscoverEntry]) {
         const COLS: usize = 4;
         let spacing = ui.spacing().item_spacing.x;
         let col_w = (ui.available_width() - spacing * (COLS as f32 - 1.0)) / COLS as f32;
@@ -1394,19 +1592,45 @@ impl WebtorApp {
             // title) or the item count isn't a multiple of COLS - columns
             // run dry at different points and later rows show blank gaps.
             // Calling it fresh per row resets that alignment every time.
-            for row in self.discover_catalog.chunks(COLS) {
+            for row in entries.chunks(COLS) {
                 ui.columns(COLS, |cols| {
                     for (i, item) in row.iter().enumerate() {
                         super::theme::card_frame().show(&mut cols[i], |ui| {
                             ui.set_width(poster_w);
-                            ui.add(
-                                egui::Image::new(&item.poster)
-                                    .fit_to_exact_size(egui::vec2(poster_w, poster_h))
-                                    .corner_radius(CornerRadius::same(8))
-                                    .show_loading_spinner(true),
-                            );
+                            // An empty URL never loads at all; a present
+                            // but broken/unreachable one polls to `Err`
+                            // once egui's loader actually tries and fails -
+                            // either way that's exactly when the built-in
+                            // "broken image" triangle would otherwise show.
+                            let poster_broken = item.poster.is_empty()
+                                || ui.ctx().try_load_image(&item.poster, egui::SizeHint::default()).is_err();
+                            if poster_broken {
+                                // Reserve the exact same box a real poster
+                                // would take up, so a title with no
+                                // thumbnail doesn't collapse the card down
+                                // to a tiny, oddly-sized sliver next to its
+                                // full-height neighbors.
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(poster_w, poster_h), egui::Sense::hover());
+                                ui.painter().rect_filled(rect, CornerRadius::same(8), Color32::from_gray(35));
+                                ui.painter().text(rect.center(), Align2::CENTER_CENTER, "N/A", FontId::proportional(18.0), super::theme::MUTED);
+                            } else {
+                                ui.add(
+                                    egui::Image::new(&item.poster)
+                                        .fit_to_exact_size(egui::vec2(poster_w, poster_h))
+                                        .corner_radius(CornerRadius::same(8))
+                                        .show_loading_spinner(true),
+                                );
+                            }
                             ui.add_space(8.0);
-                            ui.label(RichText::new(&item.name).size(14.0).strong().color(super::theme::TEXT));
+                            // Wrapping to 2 lines for longer titles made
+                            // cards in the same row different heights -
+                            // `ui.columns` tracks each column's height
+                            // independently, so the shorter card's rounded
+                            // bottom ended early, leaving plain page
+                            // background above the next row that looked
+                            // like a missing/square corner. Truncating to
+                            // one line keeps every card the same height.
+                            ui.add(egui::Label::new(RichText::new(&item.name).size(14.0).strong().color(super::theme::TEXT)).truncate());
                             let meta = match (item.year.is_empty(), item.imdb_rating.is_empty()) {
                                 (false, false) => format!("{} - {} {}", item.year, egui_phosphor::regular::STAR, item.imdb_rating),
                                 (false, true) => item.year.clone(),
@@ -1445,9 +1669,6 @@ impl WebtorApp {
                 self.open_source_picker(title, kind, id, addon.base_url.clone());
             }
         }
-
-        ui.add_space(10.0);
-        self.discover_pagination_row(ui, &addon.base_url);
     }
 
     /// `ui.horizontal` claims the parent's full available width up front
@@ -1612,11 +1833,7 @@ impl WebtorApp {
         let content_w = 440.0_f32;
         let mut open = true;
         let mut done_clicked = false;
-        let short_title = if t.title.chars().count() > 40 {
-            format!("{}...", t.title.chars().take(40).collect::<String>())
-        } else {
-            t.title.clone()
-        };
+        let short_title = truncate_title(&t.title, 40);
         egui::Window::new(format!("Files - {short_title}"))
             .collapsible(false)
             .resizable(false)
@@ -1701,7 +1918,7 @@ impl WebtorApp {
         let content_w = 380.0_f32;
         let mut open = true;
         let mut chosen: Option<bool> = None; // Some(delete_files)
-        egui::Window::new(format!("Remove \"{}\"?", t.title))
+        egui::Window::new(format!("Remove \"{}\"?", truncate_title(&t.title, 40)))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
