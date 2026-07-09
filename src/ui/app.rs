@@ -427,17 +427,6 @@ fn known_source_label(s: &str) -> &'static str {
     }
 }
 
-/// A long torrent title in an `egui::Window`'s title bar stretches the
-/// whole window wider than its body's explicit width - the title bar isn't
-/// bound by `set_max_width`/`set_width` the way content is.
-fn truncate_title(title: &str, max_chars: usize) -> String {
-    if title.chars().count() > max_chars {
-        format!("{}...", title.chars().take(max_chars).collect::<String>())
-    } else {
-        title.to_string()
-    }
-}
-
 /// A real webtor.io add-on/integration - things that plug webtor into other
 /// software, sourced from webtor.io's own homepage. Deliberately excludes
 /// core in-product features (Direct Download Links, Instant Streaming, ZIP
@@ -1833,8 +1822,15 @@ impl WebtorApp {
         let content_w = 440.0_f32;
         let mut open = true;
         let mut done_clicked = false;
-        let short_title = truncate_title(&t.title, 40);
-        egui::Window::new(format!("Files - {short_title}"))
+        // A long title in the WINDOW's own title bar stretches the whole
+        // window wider than the body's explicit width - it isn't bound by
+        // set_max_width the way body content is, and title-bar text uses
+        // different font metrics than body text so no fixed character
+        // count is ever safe. Keep the chrome title static and put the
+        // real (pixel-accurate truncated) title in the body instead, where
+        // width is actually under control - this applies to every popup
+        // that shows a torrent/media title, not just this one.
+        egui::Window::new("Files")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1853,6 +1849,8 @@ impl WebtorApp {
                 // match, since there's nothing else bounding it.
                 ui.set_max_width(content_w);
                 ui.set_min_width(content_w);
+                ui.add(egui::Label::new(RichText::new(&t.title).size(15.0).strong().color(super::theme::TEXT)).truncate());
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("Select All").clicked() {
                         t.selected_files = None;
@@ -1918,7 +1916,7 @@ impl WebtorApp {
         let content_w = 380.0_f32;
         let mut open = true;
         let mut chosen: Option<bool> = None; // Some(delete_files)
-        egui::Window::new(format!("Remove \"{}\"?", truncate_title(&t.title, 40)))
+        egui::Window::new("Remove Download?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1935,6 +1933,8 @@ impl WebtorApp {
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new(egui_phosphor::regular::TRASH).size(32.0).color(super::theme::PINK));
                     ui.add_space(10.0);
+                    ui.add(egui::Label::new(RichText::new(&t.title).size(14.0).strong().color(super::theme::TEXT)).truncate());
+                    ui.add_space(6.0);
                     ui.label(
                         RichText::new("Just remove it from the app, or also delete the downloaded files from disk?")
                             .size(13.0)
@@ -2102,7 +2102,10 @@ impl WebtorApp {
 
         let mut open = self.source_picker_open;
         let mut to_add: Option<usize> = None;
-        egui::Window::new(format!("Sources for \"{}\"", self.source_picker_title))
+        // Static chrome title - see render_file_picker_popup for why the
+        // actual (long, variable) title lives in the body instead of the
+        // window's own title bar.
+        egui::Window::new("Find Sources")
             .collapsible(false)
             .resizable(true)
             .default_size([820.0, 520.0])
@@ -2116,6 +2119,8 @@ impl WebtorApp {
             )
             .open(&mut open)
             .show(&ctx, |ui| {
+                ui.add(egui::Label::new(RichText::new(&self.source_picker_title).size(15.0).strong().color(super::theme::TEXT)).truncate());
+                ui.add_space(10.0);
                 if self.source_picker_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
