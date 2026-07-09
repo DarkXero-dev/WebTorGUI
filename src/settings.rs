@@ -41,6 +41,20 @@ pub enum CloseAction {
     Quit,
 }
 
+/// Which player backend to use for in-app video playback on Windows - mpv
+/// is the only player `player_windows.rs` can actually embed (via `--wid`),
+/// so anyone who'd rather use a different player gets it launched
+/// externally (its own window) instead of embedded. `None` on
+/// `AppSettings.windows_player_choice` means "never asked yet" and
+/// triggers the first-launch popup; irrelevant on Linux, which always
+/// embeds via mpv/X11 with no choice involved.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsPlayerChoice {
+    BundledMpv,
+    External(String),
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub download_dir: String,
@@ -62,6 +76,11 @@ pub struct AppSettings {
     /// `None` means always show the confirmation dialog.
     #[serde(default)]
     pub remembered_close_action: Option<CloseAction>,
+    /// `None` until the Windows first-launch popup resolves it (or
+    /// forever, on Linux, which never shows that popup and never reads
+    /// this field).
+    #[serde(default)]
+    pub windows_player_choice: Option<WindowsPlayerChoice>,
 }
 
 impl Default for AppSettings {
@@ -81,6 +100,7 @@ impl Default for AppSettings {
             discover_addons: default_discover_addons(),
             stream_addons: Vec::new(),
             remembered_close_action: None,
+            windows_player_choice: None,
         }
     }
 }
@@ -166,6 +186,7 @@ mod tests {
             discover_addons: default_discover_addons(),
             stream_addons: Vec::new(),
             remembered_close_action: None,
+            windows_player_choice: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
@@ -173,6 +194,17 @@ mod tests {
         assert_eq!(original.threads_per_download, restored.threads_per_download);
         assert_eq!(original.quiet_hours_start, restored.quiet_hours_start);
         assert_eq!(original.folder_rules.video, restored.folder_rules.video);
+    }
+
+    #[test]
+    fn windows_player_choice_round_trips_through_json() {
+        let mut settings = AppSettings::default();
+        settings.windows_player_choice = Some(WindowsPlayerChoice::External("C:\\Players\\vlc.exe".to_string()));
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.windows_player_choice, Some(WindowsPlayerChoice::External("C:\\Players\\vlc.exe".to_string())));
     }
 
     #[test]

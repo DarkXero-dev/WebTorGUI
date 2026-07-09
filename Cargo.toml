@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "0.1.3"
+version = "0.1.4"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"
@@ -48,8 +48,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Backs player_windows.rs's Win32 child-window embedding (CreateWindowExW,
-# SetParent, SetWindowPos, monitor bounds for native fullscreen).
-windows = { version = "0.58", features = [
+# SetParent, SetWindowPos, monitor bounds for native fullscreen). Pinned to
+# match accesskit_windows's own `windows` requirement (a real, unconditional
+# dependency of eframe's accessibility feature on Windows) - a mismatched
+# version here means two distinct, mutually-incompatible `windows_core`
+# crates in the graph, and the generic `Param`/`TypeKind` trait machinery
+# windows-rs relies on for ergonomic argument passing breaks across that
+# boundary (this is exactly what broke the first attempt at this).
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",

@@ -565,6 +565,11 @@ pub struct WebtorApp {
 
     stream_input: String,
     now_playing: Option<String>,
+    /// Set only when playback went through a user-chosen external player
+    /// (Windows, see `settings::WindowsPlayerChoice::External`) rather
+    /// than mpv-embedded or the OS-default "Open Externally" handoff -
+    /// distinguishes the three cases for the Now Playing status text.
+    now_playing_external_player: Option<String>,
     playing_embedded: bool,
     player_error: Option<String>,
     own_window_handle: Option<isize>,
@@ -712,6 +717,7 @@ impl WebtorApp {
             download_speeds: std::collections::HashMap::new(),
             stream_input: String::new(),
             now_playing: None,
+            now_playing_external_player: None,
             playing_embedded: false,
             player_error: None,
             own_window_handle,
@@ -2290,7 +2296,10 @@ impl WebtorApp {
             return;
         }
         match open::that(&target) {
-            Ok(()) => self.now_playing = Some(target),
+            Ok(()) => {
+                self.now_playing_external_player = None;
+                self.now_playing = Some(target);
+            }
             Err(e) => self.player_error = Some(format!("Could not open player: {e}")),
         }
     }
@@ -2302,6 +2311,23 @@ impl WebtorApp {
             self.player_error = Some("Enter a URL or file path first.".to_string());
             return;
         }
+
+        #[cfg(target_os = "windows")]
+        {
+            let choice = self.settings.lock().unwrap().windows_player_choice.clone();
+            if let Some(settings::WindowsPlayerChoice::External(player_path)) = choice {
+                match std::process::Command::new(&player_path).arg(&target).spawn() {
+                    Ok(_) => {
+                        self.playing_embedded = false;
+                        self.now_playing_external_player = Some(player_path);
+                        self.now_playing = Some(target);
+                    }
+                    Err(e) => self.player_error = Some(format!("Could not start {player_path}: {e}")),
+                }
+                return;
+            }
+        }
+
         let Some(parent_handle) = self.own_window_handle else {
             self.player_error = Some("Embedded playback needs a window handle this backend isn't exposing.".to_string());
             return;
@@ -2310,6 +2336,7 @@ impl WebtorApp {
             Ok(player) => {
                 self.embedded = Some(player);
                 self.playing_embedded = true;
+                self.now_playing_external_player = None;
                 self.now_playing = Some(target);
             }
             Err(e) => self.player_error = Some(format!("Could not start embedded playback: {e}")),
@@ -2453,15 +2480,15 @@ impl WebtorApp {
                 Some(target) => {
                     ui.label(RichText::new(target).size(14.0).color(super::theme::TEXT));
                     ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(if self.playing_embedded {
-                            "Playing embedded via mpv."
-                        } else {
-                            "Handed off to your system's default player."
-                        })
-                        .size(12.0)
-                        .color(super::theme::MUTED),
-                    );
+                    let status = match (&self.now_playing_external_player, self.playing_embedded) {
+                        (Some(player_path), _) => format!(
+                            "Playing externally via {} - opened in its own window, not embedded.",
+                            std::path::Path::new(player_path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| player_path.clone())
+                        ),
+                        (None, true) => "Playing embedded via mpv.".to_string(),
+                        (None, false) => "Handed off to your system's default player.".to_string(),
+                    };
+                    ui.label(RichText::new(status).size(12.0).color(super::theme::MUTED));
                 }
                 None => {
                     ui.label(RichText::new("Nothing playing yet - paste a source above, or pick one from Discover.").size(13.0).color(super::theme::MUTED));
@@ -3227,6 +3254,96 @@ impl WebtorApp {
         }
     }
 
+    /// One-time popup, Windows only: mpv (bundled) is the only player
+    /// `player_windows.rs` can actually embed - offer a way out for anyone
+    /// who'd rather use a different player, understanding it'll open
+    /// externally (its own window) rather than embedded in this one.
+    /// Never shows again once `windows_player_choice` is `Some(_)`.
+    #[cfg(target_os = "windows")]
+    fn render_player_choice_popup(&mut self, ctx: &egui::Context) {
+        if self.settings.lock().unwrap().windows_player_choice.is_some() {
+            return;
+        }
+        let content_w = 420.0_f32;
+        let mut resolved: Option<settings::WindowsPlayerChoice> = None;
+        egui::Window::new("Webtor Desktop")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::new()
+                    .fill(super::theme::PANEL)
+                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .corner_radius(CornerRadius::same(12))
+                    .inner_margin(Margin::same(24)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(content_w);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(egui_phosphor::regular::PLAY_CIRCLE).size(32.0).color(super::theme::PINK));
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Video Playback").size(15.0).strong().color(super::theme::TEXT));
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Webtor Desktop uses mpv (bundled with this install) for in-app embedded video playback. \
+                             Prefer a different player? It'll open as its own separate window instead of embedded here.",
+                        )
+                        .size(13.0)
+                        .color(super::theme::MUTED),
+                    );
+                });
+                ui.add_space(16.0);
+                ui.columns(2, |cols| {
+                    // ui.columns forces a left-aligned layout that Button
+                    // inherits for its own text - recenter explicitly so
+                    // labels aren't pinned left of a full-width button.
+                    cols[0].with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Use Bundled mpv").color(Color32::from_rgb(20, 8, 14)))
+                                    .fill(super::theme::PINK)
+                                    .corner_radius(CornerRadius::same(8))
+                                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+                            )
+                            .clicked()
+                        {
+                            resolved = Some(settings::WindowsPlayerChoice::BundledMpv);
+                        }
+                    });
+                    cols[1].with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Use a Different Player").color(super::theme::TEXT))
+                                    .fill(Color32::from_gray(45))
+                                    .corner_radius(CornerRadius::same(8))
+                                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+                            )
+                            .clicked()
+                        {
+                            // Cancelling the picker falls back to bundled
+                            // mpv rather than leaving this unresolved -
+                            // otherwise the popup would nag every launch
+                            // just because they backed out once.
+                            resolved = Some(
+                                rfd::FileDialog::new()
+                                    .add_filter("Executable", &["exe"])
+                                    .pick_file()
+                                    .map(|p| settings::WindowsPlayerChoice::External(p.to_string_lossy().to_string()))
+                                    .unwrap_or(settings::WindowsPlayerChoice::BundledMpv),
+                            );
+                        }
+                    });
+                });
+            });
+
+        if let Some(choice) = resolved {
+            let mut settings = self.settings.lock().unwrap();
+            settings.windows_player_choice = Some(choice);
+            let _ = save_settings(&settings);
+        }
+    }
+
     fn render_tray_notice(&mut self, ctx: &egui::Context) {
         // mpv's embedded window is a real X11 child, not something egui
         // draws - it always paints over this popup's screen region
@@ -3328,6 +3445,8 @@ impl eframe::App for WebtorApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.render_tray_notice(&ui.ctx().clone());
+        #[cfg(target_os = "windows")]
+        self.render_player_choice_popup(&ui.ctx().clone());
         self.drain_download_events();
 
         if !self.logged_in {
