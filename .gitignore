@@ -3,3 +3,8 @@
 .superpowers/
 push.sh
 tagp.sh
+
+# makepkg build artifacts - regenerated every build, not source
+packaging/pkg/
+packaging/src/
+packaging/*.tar.gz

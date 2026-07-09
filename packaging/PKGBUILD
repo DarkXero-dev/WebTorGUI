@@ -24,7 +24,11 @@ prepare() {
 build() {
     cd "$srcdir/$_srcname"
     export RUSTUP_TOOLCHAIN=stable
-    export RUSTFLAGS="-C opt-level=2"
+    # ring's hand-written assembly has documented linking failures under
+    # lld (undefined ring_core_* symbols - the compiled assembly object
+    # never actually gets linked in) - force the traditional bfd linker,
+    # which doesn't have this problem, instead of whatever rustc defaults to.
+    export RUSTFLAGS="-C opt-level=2 -C link-arg=-fuse-ld=bfd"
     cargo build --release
 }
 
