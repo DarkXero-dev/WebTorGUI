@@ -35,7 +35,12 @@ pub struct EmbeddedPlayer {
 }
 
 impl EmbeddedPlayer {
-    pub fn spawn(parent_xid: u32, x: i32, y: i32, w: u32, h: u32, source: &str) -> Result<Self> {
+    /// `parent_handle` is the owning window's raw ID widened to `isize` -
+    /// an X11 XID is 32-bit, but the Windows implementation's `HWND` is
+    /// pointer-sized, so `isize` is the common type the caller in
+    /// `ui/app.rs` can hold regardless of platform.
+    pub fn spawn(parent_handle: isize, x: i32, y: i32, w: u32, h: u32, source: &str) -> Result<Self> {
+        let parent_xid = parent_handle as u32;
         let (conn, screen_num) = x11rb::connect(None).map_err(|e| anyhow!("no X11 connection: {e}"))?;
         let win_id = conn.generate_id()?;
         let screen = &conn.setup().roots[screen_num];
@@ -253,12 +258,13 @@ impl Drop for EmbeddedPlayer {
 }
 
 /// Extract the X11 window ID of our own app window, if the current backend
-/// exposes one (X11/XWayland via Xlib or Xcb raw-window-handle variants).
-pub fn own_window_xid(handle: raw_window_handle::RawWindowHandle) -> Option<u32> {
+/// exposes one (X11/XWayland via Xlib or Xcb raw-window-handle variants),
+/// widened to `isize` to match the Windows implementation's `HWND`.
+pub fn own_window_handle(handle: raw_window_handle::RawWindowHandle) -> Option<isize> {
     use raw_window_handle::RawWindowHandle;
     match handle {
-        RawWindowHandle::Xlib(h) => Some(h.window as u32),
-        RawWindowHandle::Xcb(h) => Some(h.window.get()),
+        RawWindowHandle::Xlib(h) => Some(h.window as isize),
+        RawWindowHandle::Xcb(h) => Some(h.window.get() as isize),
         _ => None,
     }
 }

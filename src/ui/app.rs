@@ -567,7 +567,7 @@ pub struct WebtorApp {
     now_playing: Option<String>,
     playing_embedded: bool,
     player_error: Option<String>,
-    own_xid: Option<u32>,
+    own_window_handle: Option<isize>,
     embedded: Option<EmbeddedPlayer>,
 
     discover_catalog: Vec<DiscoverEntry>,
@@ -633,9 +633,9 @@ impl WebtorApp {
     ) -> Self {
         super::theme::apply(&cc.egui_ctx);
 
-        let own_xid = {
+        let own_window_handle = {
             use raw_window_handle::HasWindowHandle;
-            cc.window_handle().ok().and_then(|h| crate::player::own_window_xid(h.as_raw()))
+            cc.window_handle().ok().and_then(|h| crate::player::own_window_handle(h.as_raw()))
         };
 
         // Auto-login if we have a real, still-valid webtor.io session saved
@@ -714,7 +714,7 @@ impl WebtorApp {
             now_playing: None,
             playing_embedded: false,
             player_error: None,
-            own_xid,
+            own_window_handle,
             embedded: None,
             discover_catalog: Vec::new(),
             discover_rx: None,
@@ -2302,11 +2302,11 @@ impl WebtorApp {
             self.player_error = Some("Enter a URL or file path first.".to_string());
             return;
         }
-        let Some(xid) = self.own_xid else {
-            self.player_error = Some("Embedded playback needs an X11/XWayland session - this one isn't exposing a window ID.".to_string());
+        let Some(parent_handle) = self.own_window_handle else {
+            self.player_error = Some("Embedded playback needs a window handle this backend isn't exposing.".to_string());
             return;
         };
-        match EmbeddedPlayer::spawn(xid, x, y, w, h, &target) {
+        match EmbeddedPlayer::spawn(parent_handle, x, y, w, h, &target) {
             Ok(player) => {
                 self.embedded = Some(player);
                 self.playing_embedded = true;

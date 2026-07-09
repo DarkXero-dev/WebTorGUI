@@ -8,7 +8,15 @@ pub mod auth;
 pub mod browser_login;
 pub mod db;
 pub mod downloads;
+// Embedded video playback (mpv reparented into our own window) needs
+// platform-specific window-handling code - X11 reparenting on Linux, Win32
+// child windows on Windows. Both files expose the same `EmbeddedPlayer`
+// shape, so nothing outside this module needs a cfg gate of its own.
 #[cfg(target_os = "linux")]
+#[path = "player.rs"]
+pub mod player;
+#[cfg(target_os = "windows")]
+#[path = "player_windows.rs"]
 pub mod player;
 pub mod settings;
 #[cfg(target_os = "linux")]

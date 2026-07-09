@@ -81,6 +81,15 @@ jobs:
       - name: Run tests
         run: cargo test --release
 
+      # Bundled with the app - embedded playback shells out to it via --wid.
+      - name: Download mpv
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path windows/mpv | Out-Null
+          Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/latest/download" -OutFile mpv.7z -UserAgent "Mozilla/5.0"
+          7z x mpv.7z -owindows/mpv -y
+          Copy-Item windows/mpv/mpv.exe target/release/mpv.exe
+
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
 

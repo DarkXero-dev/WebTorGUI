@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "0.1.1"
+version = "0.1.2"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"
@@ -39,16 +39,27 @@ reqwest_cookie_store = { version = "0.8", features = ["serde"] }
 cookie_store = "0.21"
 librqbit = { version = "8.1.1", features = ["http-api", "tracing-subscriber-utils"] }
 percent-encoding = "2.3.2"
+# Needed on every platform now - both player.rs (X11) and player_windows.rs
+# (Win32) get their own window's handle through this crate's traits/types.
+raw-window-handle = "0.6"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Backs player_windows.rs's Win32 child-window embedding (CreateWindowExW,
+# SetParent, SetWindowPos, monitor bounds for native fullscreen).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
-raw-window-handle = "0.6"
 # The login webview (embedded browser) and system tray are Linux-only for
 # now - wry/tao need GTK on Linux, and ksni's StatusNotifierItem protocol is
 # D-Bus/Linux-specific. See src/lib.rs for the matching #[cfg] gates.
@@ -69,6 +80,12 @@ out-dir = "target/release/bundle"
 desktop-template = "packaging/webtorapp.desktop"
 depends = ["libwebkit2gtk-4.1-0", "libgtk-3-0", "mpv"]
 
+# mpv.exe is fetched by CI (.github/workflows/build.yml, Windows job) and
+# dropped at target/release/mpv.exe before this runs - Windows has no
+# system package manager convention to depend on it the way Linux does.
+[package.metadata.packager.nsis]
+resources = ["target/release/mpv.exe"]
+
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/webtorapp", dest = "/usr/bin/webtorapp", mode = "0755" },
@@ -82,5 +99,5 @@ assets = [
 [package.metadata.generate-rpm.requires]
 openssl-libs = "*"
 mpv = "*"
-webkit2gtk4.1 = "*"
+"webkit2gtk4.1" = "*"
 gtk3 = "*"
