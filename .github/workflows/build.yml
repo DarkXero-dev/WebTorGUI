@@ -110,4 +110,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: webtorapp-windows
-          path: target/release/bundle/nsis/*.exe
+          # cargo-packager drops the NSIS installer straight into bundle/,
+          # not a bundle/nsis/ subfolder - the recursive glob also covers
+          # it if a future cargo-packager version nests it after all.
+          path: target/release/bundle/**/*.exe
