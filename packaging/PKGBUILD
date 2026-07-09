@@ -24,11 +24,17 @@ prepare() {
 build() {
     cd "$srcdir/$_srcname"
     export RUSTUP_TOOLCHAIN=stable
-    # ring's hand-written assembly has documented linking failures under
-    # lld (undefined ring_core_* symbols - the compiled assembly object
-    # never actually gets linked in) - force the traditional bfd linker,
-    # which doesn't have this problem, instead of whatever rustc defaults to.
-    export RUSTFLAGS="-C opt-level=2 -C link-arg=-fuse-ld=bfd"
+    # Arch's default CFLAGS/CXXFLAGS (/etc/makepkg.conf) include -flto=auto.
+    # The `ring` crate's build script compiles its own hand-written assembly
+    # via the `cc` crate, which picks up CFLAGS - the resulting objects end
+    # up as LTO bytecode instead of real machine code, and rustc's final
+    # link doesn't invoke LTO for them, so the actual symbols
+    # (ring_core_0_17_14__*) never materialize and the link fails with
+    # "undefined reference" no matter which linker is used. Strip just the
+    # LTO flag, keep every other hardening flag Arch sets.
+    export CFLAGS="${CFLAGS//-flto=auto/}"
+    export CXXFLAGS="${CXXFLAGS//-flto=auto/}"
+    export RUSTFLAGS="-C opt-level=2"
     cargo build --release
 }
 
