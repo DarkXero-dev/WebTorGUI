@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "0.1.4"
+version = "0.1.5"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"

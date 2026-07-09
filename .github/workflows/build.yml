@@ -82,13 +82,18 @@ jobs:
         run: cargo test --release
 
       # Bundled with the app - embedded playback shells out to it via --wid.
-      - name: Download mpv
+      # sourceforge.net (mpv's usual Windows build host) sits behind a
+      # Cloudflare JS challenge that a plain Invoke-WebRequest can't pass,
+      # so this uses Chocolatey instead - already preinstalled on
+      # windows-latest runners, and built for exactly this kind of
+      # unattended CI install.
+      - name: Install mpv via Chocolatey
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path windows/mpv | Out-Null
-          Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/latest/download" -OutFile mpv.7z -UserAgent "Mozilla/5.0"
-          7z x mpv.7z -owindows/mpv -y
-          Copy-Item windows/mpv/mpv.exe target/release/mpv.exe
+          choco install mpv -y --no-progress
+          $mpvExe = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\mpv" -Filter "mpv.exe" -Recurse | Select-Object -First 1
+          if (-not $mpvExe) { throw "mpv.exe not found after choco install" }
+          Copy-Item $mpvExe.FullName target/release/mpv.exe
 
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
