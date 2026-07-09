@@ -91,8 +91,13 @@ jobs:
         shell: pwsh
         run: |
           choco install mpv -y --no-progress
-          $mpvExe = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\mpv" -Filter "mpv.exe" -Recurse | Select-Object -First 1
-          if (-not $mpvExe) { throw "mpv.exe not found after choco install" }
+          # The `mpv` package is a thin wrapper - the actual binary gets
+          # extracted by its `mpvio.install` dependency into a sibling
+          # package folder, not lib\mpv itself. Search the whole lib tree
+          # rather than hardcoding which package owns the real exe.
+          $mpvExe = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib" -Filter "mpv.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $mpvExe) { throw "mpv.exe not found anywhere under C:\ProgramData\chocolatey\lib after choco install" }
+          Write-Host "Found mpv.exe at $($mpvExe.FullName)"
           Copy-Item $mpvExe.FullName target/release/mpv.exe
 
       - name: Install cargo-packager
