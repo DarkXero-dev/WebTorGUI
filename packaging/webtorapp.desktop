@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Webtor Desktop
+Comment=Native premium desktop client for webtor.io
+Exec=webtorapp
+Icon=webtorapp
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;
+Keywords=torrent;stream;download;webtor;

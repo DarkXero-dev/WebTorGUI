@@ -1,0 +1,86 @@
+[package]
+name = "webtorapp"
+version = "0.1.0"
+description = "Webtor Desktop - native premium client for webtor.io"
+authors = ["techxero"]
+license = "MIT"
+edition = "2021"
+
+[[bin]]
+name = "webtorapp"
+path = "src/main.rs"
+
+[lib]
+name = "webtorapp_lib"
+crate-type = ["rlib"]
+
+[dependencies]
+eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts", "accesskit", "x11", "wayland"] }
+egui = "0.34"
+egui_extras = { version = "0.34", features = ["image", "http"] }
+egui-phosphor = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
+rusqlite = { version = "0.31" }
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "cookies"] }
+uuid = { version = "1", features = ["v4"] }
+open = "5"
+aes-gcm = "0.10"
+blake3 = "1"
+machine-uid = "0.5"
+base64 = "0.22"
+reqwest_cookie_store = { version = "0.8", features = ["serde"] }
+cookie_store = "0.21"
+librqbit = { version = "8.1.1", features = ["http-api", "tracing-subscriber-utils"] }
+percent-encoding = "2.3.2"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+raw-window-handle = "0.6"
+# The login webview (embedded browser) and system tray are Linux-only for
+# now - wry/tao need GTK on Linux, and ksni's StatusNotifierItem protocol is
+# D-Bus/Linux-specific. See src/lib.rs for the matching #[cfg] gates.
+tao = "0.35.3"
+wry = "0.55"
+gtk = "0.18"
+ksni = { version = "0.3.5", default-features = false, features = ["async-io", "blocking"] }
+
+[package.metadata.packager]
+name = "WebtorApp"
+identifier = "com.techxero.webtorapp"
+description = "Native premium desktop client for webtor.io"
+homepage = "https://github.com/DarkXero-dev/WebTorGUI"
+icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"]
+out-dir = "target/release/bundle"
+
+[package.metadata.packager.deb]
+desktop-template = "packaging/webtorapp.desktop"
+depends = ["libwebkit2gtk-4.1-0", "libgtk-3-0", "mpv"]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/webtorapp", dest = "/usr/bin/webtorapp", mode = "0755" },
+    { source = "icons/icon.png", dest = "/usr/share/pixmaps/webtorapp.png", mode = "0644" },
+    { source = "icons/32x32.png", dest = "/usr/share/icons/hicolor/32x32/apps/webtorapp.png", mode = "0644" },
+    { source = "icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/webtorapp.png", mode = "0644" },
+    { source = "icons/icon.png", dest = "/usr/share/icons/hicolor/512x512/apps/webtorapp.png", mode = "0644" },
+    { source = "packaging/webtorapp.desktop", dest = "/usr/share/applications/webtorapp.desktop", mode = "0644" },
+]
+
+[package.metadata.generate-rpm.requires]
+openssl-libs = "*"
+mpv = "*"
+webkit2gtk4.1 = "*"
+gtk3 = "*"
