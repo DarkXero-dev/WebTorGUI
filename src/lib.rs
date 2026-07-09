@@ -1,10 +1,19 @@
 pub mod auth;
-// The login webview runs its own event loop on a background thread, which
-// works on X11 but is a hard incompatibility with Cocoa (macOS requires all
-// windowing on the true main thread) - porting this needs a real
-// multi-viewport redesign, not something to guess at untested. Linux-only
-// until that lands.
+// webtor.io's Cloudflare challenge can't be passed by a plain HTTP client,
+// so login happens in a real embedded browser whose cookies we then read.
+// That needs platform-specific windowing - webkit2gtk on Linux, WebView2 on
+// Windows - so this mirrors the `player` split below: two files, one module
+// name, one shared `open_login_window` API, no cfg gates for callers.
+//
+// macOS is still unsupported: the webview runs its own event loop on a
+// background thread, which is a hard incompatibility with Cocoa (macOS
+// requires all windowing on the true main thread). Porting there needs a
+// real multi-viewport redesign, not something to guess at untested.
 #[cfg(target_os = "linux")]
+#[path = "browser_login.rs"]
+pub mod browser_login;
+#[cfg(target_os = "windows")]
+#[path = "browser_login_windows.rs"]
 pub mod browser_login;
 pub mod db;
 pub mod downloads;

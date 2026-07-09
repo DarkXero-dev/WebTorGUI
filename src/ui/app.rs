@@ -589,7 +589,7 @@ pub struct WebtorApp {
     login_error: Option<String>,
     login_loading: bool,
     webtor_auth: WebtorAuth,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     browser_login_rx: Option<Receiver<crate::browser_login::CookieResult>>,
 
     tray_notice_open: bool,
@@ -766,7 +766,7 @@ impl WebtorApp {
             login_error: None,
             login_loading: false,
             webtor_auth,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             browser_login_rx: None,
             tray_notice_open: false,
             never_ask_again_checked: false,
@@ -878,12 +878,14 @@ impl WebtorApp {
     /// Real login against webtor.io's actual auth backend (SuperTokens
     /// Passwordless) - confirmed from their own frontend bundle that there is
     /// no password field on the real site, only an email code + Google/Patreon
-    /// OAuth. OAuth isn't feasible from a desktop app without an embedded
-    /// browser (webtor's OAuth redirect URI is fixed to their own web
-    /// callback, not a localhost port we could intercept), so this implements
-    /// the email-code flow, which a plain HTTP client can do end-to-end.
+    /// OAuth. Neither is reachable from a plain HTTP client: webtor.io's
+    /// Cloudflare challenge rejects reqwest outright (see
+    /// `crate::webtor_auth`), and webtor's OAuth redirect URI is fixed to
+    /// their own web callback, not a localhost port we could intercept. So
+    /// this hands off to a real embedded browser window
+    /// (`crate::browser_login`) and imports the cookies it captures.
     fn login_page(&mut self, ui: &mut Ui) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             if let Some(rx) = &self.browser_login_rx {
                 if let Ok(result) = rx.try_recv() {
@@ -972,7 +974,7 @@ impl WebtorApp {
                         ui.separator();
                         ui.add_space(22.0);
 
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "windows"))]
                         {
                             ui.label(
                                 RichText::new("webtor.io's bot protection blocks a plain login form here - sign in through a real browser window instead.")
@@ -1007,10 +1009,10 @@ impl WebtorApp {
                                 self.browser_login_rx = Some(rx);
                             }
                         }
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                         {
                             ui.label(
-                                RichText::new("Sign-in isn't available on this platform yet - the login window needs a Linux-only windowing feature. Linux builds support it today.")
+                                RichText::new("Sign-in isn't available on this platform yet - the login window needs a windowing feature this build doesn't have. Linux and Windows builds support it today.")
                                     .size(12.0)
                                     .color(super::theme::MUTED),
                             );
