@@ -9,12 +9,20 @@ pub mod auth;
 // background thread, which is a hard incompatibility with Cocoa (macOS
 // requires all windowing on the true main thread). Porting there needs a
 // real multi-viewport redesign, not something to guess at untested.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "embedded-login"))]
 #[path = "browser_login.rs"]
 pub mod browser_login;
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "embedded-login"))]
 #[path = "browser_login_windows.rs"]
 pub mod browser_login;
+// Windows 7 build only (see the `win7` feature in Cargo.toml): WebView2 has
+// had no security updates since Jan 2023 on Win7, and the Evergreen
+// bootstrapper refuses to install there at all anymore, so there's no
+// embedded browser to speak of. Login instead opens the user's own system
+// browser and asks them to paste the session cookie back in. See
+// src/manual_login.rs and the login UI branch in src/ui/app.rs.
+#[cfg(all(target_os = "windows", feature = "win7"))]
+pub mod manual_login;
 pub mod db;
 pub mod downloads;
 // Embedded video playback (mpv reparented into our own window) needs

@@ -589,8 +589,10 @@ pub struct WebtorApp {
     login_error: Option<String>,
     login_loading: bool,
     webtor_auth: WebtorAuth,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
     browser_login_rx: Option<Receiver<crate::browser_login::CookieResult>>,
+    #[cfg(all(target_os = "windows", feature = "win7"))]
+    win7_cookie_input: String,
 
     tray_notice_open: bool,
     never_ask_again_checked: bool,
@@ -766,8 +768,10 @@ impl WebtorApp {
             login_error: None,
             login_loading: false,
             webtor_auth,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
             browser_login_rx: None,
+            #[cfg(all(target_os = "windows", feature = "win7"))]
+            win7_cookie_input: String::new(),
             tray_notice_open: false,
             never_ask_again_checked: false,
             settings_saved: false,
@@ -885,7 +889,7 @@ impl WebtorApp {
     /// this hands off to a real embedded browser window
     /// (`crate::browser_login`) and imports the cookies it captures.
     fn login_page(&mut self, ui: &mut Ui) {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
         {
             if let Some(rx) = &self.browser_login_rx {
                 if let Ok(result) = rx.try_recv() {
@@ -974,7 +978,72 @@ impl WebtorApp {
                         ui.separator();
                         ui.add_space(22.0);
 
-                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        #[cfg(all(target_os = "windows", feature = "win7"))]
+                        {
+                            ui.label(
+                                RichText::new(
+                                    "webtor.io's bot protection blocks a plain login form here, and this Windows 7 build can't use an embedded browser window. Sign in through your own browser, then paste the session cookie back here.",
+                                )
+                                .size(12.0)
+                                .color(super::theme::MUTED),
+                            );
+                            ui.add_space(14.0);
+
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("Open webtor.io/login in your browser").size(14.0).color(super::theme::TEXT))
+                                        .fill(Color32::from_gray(32))
+                                        .stroke(Stroke::new(1.0, Color32::from_gray(45)))
+                                        .min_size(egui::vec2(content_w, 40.0)),
+                                )
+                                .clicked()
+                            {
+                                self.login_error = None;
+                                if let Err(e) = crate::manual_login::open_system_browser() {
+                                    self.login_error = Some(e.to_string());
+                                }
+                            }
+
+                            ui.add_space(14.0);
+                            ui.label(
+                                RichText::new(
+                                    "After signing in: open DevTools (F12) -> Network tab -> click any request to webtor.io -> Request Headers -> copy the full \"Cookie\" value -> paste it below.",
+                                )
+                                .size(11.0)
+                                .color(super::theme::MUTED),
+                            );
+                            ui.add_space(8.0);
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.win7_cookie_input)
+                                    .desired_rows(3)
+                                    .desired_width(content_w)
+                                    .hint_text("sAccessToken=...; front-token=...; ..."),
+                            );
+                            ui.add_space(14.0);
+
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("Continue").size(16.0).strong().color(Color32::from_rgb(20, 8, 14)))
+                                        .fill(super::theme::PINK)
+                                        .min_size(egui::vec2(content_w, 48.0)),
+                                )
+                                .clicked()
+                            {
+                                match crate::manual_login::parse_cookie_header(&self.win7_cookie_input) {
+                                    Ok(cookies) => match self.webtor_auth.import_cookies(cookies) {
+                                        Ok(()) if self.webtor_auth.has_session() => {
+                                            self.logged_in = true;
+                                            self.login_error = None;
+                                            self.login_email = self.webtor_auth.account_label().unwrap_or_else(|| "webtor.io account".to_string());
+                                            let _ = webtor_auth::save_session(&self.webtor_auth);
+                                        }
+                                        _ => self.login_error = Some("That didn't contain a valid session.".to_string()),
+                                    },
+                                    Err(e) => self.login_error = Some(e.to_string()),
+                                }
+                            }
+                        }
+                        #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
                         {
                             ui.label(
                                 RichText::new("webtor.io's bot protection blocks a plain login form here - sign in through a real browser window instead.")
@@ -1009,7 +1078,10 @@ impl WebtorApp {
                                 self.browser_login_rx = Some(rx);
                             }
                         }
-                        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                        #[cfg(not(any(
+                            all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"),
+                            all(target_os = "windows", feature = "win7")
+                        )))]
                         {
                             ui.label(
                                 RichText::new("Sign-in isn't available on this platform yet - the login window needs a windowing feature this build doesn't have. Linux and Windows builds support it today.")

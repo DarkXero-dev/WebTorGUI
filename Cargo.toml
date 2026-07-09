@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "1.0.3"
+version = "1.0.4"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"
@@ -24,7 +24,7 @@ rfd = "0.15"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 anyhow = "1"
-dirs = "5"
+dirs = "6"
 rusqlite = { version = "0.31" }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
@@ -42,6 +42,24 @@ percent-encoding = "2.3.2"
 # Needed on every platform now - both player.rs (X11) and player_windows.rs
 # (Win32) get their own window's handle through this crate's traits/types.
 raw-window-handle = "0.6"
+# The embedded-browser login window (webkit2gtk on Linux, WebView2 on
+# Windows - see src/browser_login.rs / src/browser_login_windows.rs).
+# Optional so the win7 build (src/manual_login.rs) can drop them entirely:
+# WebView2 has had no security updates since Jan 2023 on Windows 7, and
+# tao/wry aren't verified to even build against the win7-windows-msvc
+# tier-3 target. Always on by default - only the win7 CI job disables it.
+tao = { version = "0.35.3", optional = true }
+wry = { version = "0.55", optional = true }
+
+[features]
+default = ["embedded-login"]
+embedded-login = ["dep:tao", "dep:wry"]
+# Windows 7 build: no WebView2 (dead since Jan 2023), no tao/wry, no
+# accesskit assumptions beyond what UI Automation has offered since Vista.
+# See src/manual_login.rs and the `windows7` CI job in
+# .github/workflows/build.yml. Best-effort - untested on real Windows 7
+# hardware, since neither CI nor this dev environment has any.
+win7 = []
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -60,27 +78,12 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
 ] }
-# The Windows half of the login webview. wry drives WebView2 here (via its
-# own transitive webview2-com / windows 0.61), with no GTK involved - the
-# generic WebViewBuilder::build() path, not build_gtk(). Deliberately NOT
-# unified with the `windows` dep above: nothing from wry's windows-rs
-# version ever crosses into our code, so the two coexist. See
-# src/browser_login_windows.rs.
-tao = "0.35.3"
-wry = "0.55"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
-# tao/wry here are the Linux half of the login webview - on Linux they need
-# GTK/webkit2gtk, which is why the deps differ per platform (the Windows
-# half, below, drives WebView2 through the same wry API). The system tray is
-# still genuinely Linux-only: ksni's StatusNotifierItem protocol is
-# D-Bus-specific. See src/lib.rs for the matching #[cfg] gates.
-tao = "0.35.3"
-wry = "0.55"
 gtk = "0.18"
 ksni = { version = "0.3.5", default-features = false, features = ["async-io", "blocking"] }
 
@@ -91,13 +94,16 @@ description = "Native premium desktop client for webtor.io"
 homepage = "https://github.com/DarkXero-dev/WebTorGUI"
 icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"]
 out-dir = "target/release/bundle"
-# mpv.exe is fetched by CI (.github/workflows/build.yml, Windows job) and
-# dropped at target/release/mpv.exe before this runs, for the NSIS build to
-# place next to the installed exe - Windows has no system package manager
-# convention to depend on it the way Linux does. A no-op on Linux/macOS
-# builds: a resource entry that doesn't exist resolves as a glob with zero
-# matches rather than an error.
-resources = ["target/release/mpv.exe"]
+# mpv.exe and WebView2Loader.dll are both fetched/copied by CI
+# (.github/workflows/build.yml, Windows job) and dropped at target/release/
+# before this runs, for the NSIS build to place next to the installed exe.
+# WebView2Loader.dll in particular is a hard runtime dependency of
+# browser_login_windows.rs's login webview (see wry's raw-dylib import of
+# webview2loader.dll) - without a real copy beside webtorapp.exe, Windows
+# can't resolve that import and the installed app can't launch. A no-op on
+# Linux/macOS builds: a resource entry that doesn't exist resolves as a glob
+# with zero matches rather than an error.
+resources = ["target/release/mpv.exe", "target/release/WebView2Loader.dll"]
 
 [package.metadata.packager.deb]
 desktop-template = "packaging/webtorapp.desktop"
