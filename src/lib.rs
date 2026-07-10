@@ -40,7 +40,15 @@ pub mod settings;
 pub mod single_instance;
 pub mod torrent;
 pub mod torrent_engine;
+// The system tray, like `player` above: two files, one module name, one
+// shared `spawn`/`show_window` API. Linux speaks StatusNotifierItem over
+// D-Bus (ksni); Windows uses the Win32 notification area (tray-icon).
+// Windows gets it only with the `tray` feature (off for win7 - see Cargo.toml).
 #[cfg(target_os = "linux")]
+#[path = "tray.rs"]
+pub mod tray;
+#[cfg(all(target_os = "windows", feature = "tray"))]
+#[path = "tray_windows.rs"]
 pub mod tray;
 pub mod ui;
 pub mod webtor_auth;
@@ -118,9 +126,14 @@ pub fn run() {
             // window directly (show/focus/exit) even while it's hidden and
             // its own event loop is otherwise idle - so they get a context
             // clone here rather than going through app-side polling.
+            //
+            // On Windows this must happen here, on the main thread: the tray
+            // hooks into eframe's own message loop (see tray_windows.rs).
+            #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "tray")))]
+            tray::spawn(cc.egui_ctx.clone());
+
             #[cfg(target_os = "linux")]
             {
-                tray::spawn(cc.egui_ctx.clone());
                 let raise_ctx = cc.egui_ctx.clone();
                 std::thread::spawn(move || {
                     for stream in instance_listener.incoming().flatten() {

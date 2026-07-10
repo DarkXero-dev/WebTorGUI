@@ -40,13 +40,23 @@ mod imp {
         LoggedIn,
     }
 
-    // SuperTokens sets `front-token` as a NON-HttpOnly cookie specifically so the
+    // SuperTokens sets `sFrontToken` as a NON-HttpOnly cookie specifically so the
     // frontend can see it; its appearance means the session cookies (including
     // the HttpOnly `sAccessToken`) are now set. JS can't read `sAccessToken`, so
     // it just pings us and we read the real cookies out-of-band below.
+    //
+    // The cookie is `sFrontToken`, NOT `front-token` - that is the name of the
+    // *header* SuperTokens sends it in. Watching for `front-token=` here matches
+    // nothing, so the window hangs open forever after a successful sign-in.
+    // Verified against a live session: `document.cookie` on the post-login page
+    // reads `lang=en; st-last-access-token-update=...; sFrontToken=...`.
+    //
+    // This ping is only an auto-close convenience. Sign-in is *detected* by
+    // reading the real cookie jar once the loop ends, so a wrong guess here
+    // costs the user an extra window close, not a broken login.
     const DETECT_JS: &str = r#"
         setInterval(function () {
-          if (document.cookie.indexOf('front-token=') !== -1) {
+          if (document.cookie.indexOf('sFrontToken=') !== -1) {
             try { window.ipc.postMessage('logged-in'); } catch (e) {}
           }
         }, 400);
@@ -89,20 +99,19 @@ mod imp {
             .build(&window)
             .map_err(|e| anyhow!("could not create embedded browser: {e}"))?;
 
-        let mut logged_in = false;
         event_loop.run_return(|event, _target, control_flow| {
             *control_flow = ControlFlow::Wait;
             match event {
-                Event::UserEvent(AppEvent::LoggedIn) => {
-                    logged_in = true;
-                    *control_flow = ControlFlow::Exit;
-                }
-                Event::WindowEvent {
+                // Either the page told us it signed in, or the user closed the
+                // window. Both mean "stop waiting and go look at the cookies" -
+                // the jar, not the event, decides whether we actually have a
+                // session. That way sign-in still works if the auto-close ping
+                // never arrives (the user just closes the window when done).
+                Event::UserEvent(AppEvent::LoggedIn)
+                | Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
                     ..
-                } => {
-                    *control_flow = ControlFlow::Exit;
-                }
+                } => *control_flow = ControlFlow::Exit,
                 _ => {}
             }
         });
@@ -112,26 +121,20 @@ mod imp {
         // WebView2's async GetCookies completes; calling it from inside the
         // event-loop callback would re-enter the (non-reentrant) runner. With
         // the loop finished there is no active callback to re-enter.
-        let result = if logged_in {
-            let cookies = webview
-                .cookies_for_url("https://webtor.io")
-                .map_err(|e| anyhow!("could not read the session cookies: {e}"))?;
-            let pairs: Vec<(String, String)> = cookies
-                .iter()
-                .map(|c| (c.name().to_string(), c.value().to_string()))
-                .collect();
-            if pairs.iter().any(|(n, _)| n == "sAccessToken") {
-                Some(pairs)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let cookies = webview
+            .cookies_for_url("https://webtor.io")
+            .map_err(|e| anyhow!("could not read the session cookies: {e}"))?;
+        let pairs: Vec<(String, String)> = cookies
+            .iter()
+            .map(|c| (c.name().to_string(), c.value().to_string()))
+            .collect();
 
         drop(webview);
         drop(window);
 
-        result.ok_or_else(|| anyhow!("window closed before signing in"))
+        if !pairs.iter().any(|(n, _)| n == "sAccessToken") {
+            return Err(anyhow!("window closed before signing in"));
+        }
+        Ok(pairs)
     }
 }

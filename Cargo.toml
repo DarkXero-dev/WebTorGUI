@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "1.0.5"
+version = "1.0.6"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"
@@ -68,8 +68,12 @@ tao = { version = "0.35.3", optional = true }
 wry = { version = "0.55", optional = true }
 
 [features]
-default = ["embedded-login"]
+default = ["embedded-login", "tray"]
 embedded-login = ["dep:tao", "dep:wry"]
+# The Windows notification-area tray icon (src/tray_windows.rs). Same
+# tier-3-target caveat as embedded-login above: tray-icon isn't verified to
+# build against win7-windows-msvc, so the win7 CI job leaves it off.
+tray = ["dep:tray-icon"]
 # Windows 7 build: no WebView2 (dead since Jan 2023), no tao/wry, no
 # accesskit assumptions beyond what UI Automation has offered since Vista.
 # See src/manual_login.rs and the `windows7` CI job in
@@ -81,6 +85,13 @@ win7 = []
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# The notification-area tray icon (src/tray_windows.rs), mirroring the ksni
+# tray Linux gets. It registers a hidden message window on the thread that
+# already pumps messages - eframe's winit loop - so it must be created on the
+# main thread and never stands up an event loop of its own.
+# Optional, like tao/wry above: not verified to build against the
+# win7-windows-msvc tier-3 target, so the `win7` build drops it (`tray` feature).
+tray-icon = { version = "0.24.1", optional = true }
 # Backs player_windows.rs's Win32 child-window embedding (CreateWindowExW,
 # SetParent, SetWindowPos, monitor bounds for native fullscreen). Pinned to
 # match accesskit_windows's own `windows` requirement (a real, unconditional

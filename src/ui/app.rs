@@ -3519,14 +3519,15 @@ impl WebtorApp {
     /// then `remembered_close_action` just does that from now on.
     fn handle_tray_and_close(&mut self, ctx: &egui::Context) {
         // Minimize-to-tray only makes sense where there's an actual tray
-        // icon to bring it back from - Linux only for now (see crate::tray).
+        // icon to bring it back from - Linux and Windows (see crate::tray).
+        // Win7 builds have no tray (see the `tray` feature in Cargo.toml).
         // Elsewhere, closing the window really closes the app.
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", all(target_os = "windows", feature = "tray"))))]
         {
             let _ = ctx;
             return;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "tray")))]
         {
             if self.tray_notice_open {
                 return;
