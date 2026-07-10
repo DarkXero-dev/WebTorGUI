@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "1.0.6"
+version = "1.0.7"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"
@@ -14,8 +14,7 @@ path = "src/main.rs"
 # eframe's winit event loop and a second tao/WebView2 event loop in the same
 # process corrupt each other's per-window state and crash inside a window
 # procedure. A dedicated process owns its own true main thread (which
-# winit-family loops require) and shares nothing with the GUI. Only built when
-# embedded-login is on (the win7 build uses the paste flow instead).
+# winit-family loops require) and shares nothing with the GUI.
 [[bin]]
 name = "webtor-login"
 path = "src/bin/webtor-login.rs"
@@ -60,26 +59,12 @@ percent-encoding = "2.3.2"
 raw-window-handle = "0.6"
 # The embedded-browser login window (webkit2gtk on Linux, WebView2 on
 # Windows - see src/browser_login.rs / src/browser_login_windows.rs).
-# Optional so the win7 build (src/manual_login.rs) can drop them entirely:
-# WebView2 has had no security updates since Jan 2023 on Windows 7, and
-# tao/wry aren't verified to even build against the win7-windows-msvc
-# tier-3 target. Always on by default - only the win7 CI job disables it.
 tao = { version = "0.35.3", optional = true }
 wry = { version = "0.55", optional = true }
 
 [features]
-default = ["embedded-login", "tray"]
+default = ["embedded-login"]
 embedded-login = ["dep:tao", "dep:wry"]
-# The Windows notification-area tray icon (src/tray_windows.rs). Same
-# tier-3-target caveat as embedded-login above: tray-icon isn't verified to
-# build against win7-windows-msvc, so the win7 CI job leaves it off.
-tray = ["dep:tray-icon"]
-# Windows 7 build: no WebView2 (dead since Jan 2023), no tao/wry, no
-# accesskit assumptions beyond what UI Automation has offered since Vista.
-# See src/manual_login.rs and the `windows7` CI job in
-# .github/workflows/build.yml. Best-effort - untested on real Windows 7
-# hardware, since neither CI nor this dev environment has any.
-win7 = []
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -89,9 +74,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # tray Linux gets. It registers a hidden message window on the thread that
 # already pumps messages - eframe's winit loop - so it must be created on the
 # main thread and never stands up an event loop of its own.
-# Optional, like tao/wry above: not verified to build against the
-# win7-windows-msvc tier-3 target, so the `win7` build drops it (`tray` feature).
-tray-icon = { version = "0.24.1", optional = true }
+tray-icon = "0.24.1"
 # Backs player_windows.rs's Win32 child-window embedding (CreateWindowExW,
 # SetParent, SetWindowPos, monitor bounds for native fullscreen). Pinned to
 # match accesskit_windows's own `windows` requirement (a real, unconditional

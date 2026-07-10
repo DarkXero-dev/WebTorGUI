@@ -15,14 +15,6 @@ pub mod browser_login;
 #[cfg(all(target_os = "windows", feature = "embedded-login"))]
 #[path = "browser_login_windows.rs"]
 pub mod browser_login;
-// Windows 7 build only (see the `win7` feature in Cargo.toml): WebView2 has
-// had no security updates since Jan 2023 on Win7, and the Evergreen
-// bootstrapper refuses to install there at all anymore, so there's no
-// embedded browser to speak of. Login instead opens the user's own system
-// browser and asks them to paste the session cookie back in. See
-// src/manual_login.rs and the login UI branch in src/ui/app.rs.
-#[cfg(all(target_os = "windows", feature = "win7"))]
-pub mod manual_login;
 pub mod db;
 pub mod downloads;
 // Embedded video playback (mpv reparented into our own window) needs
@@ -43,11 +35,10 @@ pub mod torrent_engine;
 // The system tray, like `player` above: two files, one module name, one
 // shared `spawn`/`show_window` API. Linux speaks StatusNotifierItem over
 // D-Bus (ksni); Windows uses the Win32 notification area (tray-icon).
-// Windows gets it only with the `tray` feature (off for win7 - see Cargo.toml).
 #[cfg(target_os = "linux")]
 #[path = "tray.rs"]
 pub mod tray;
-#[cfg(all(target_os = "windows", feature = "tray"))]
+#[cfg(target_os = "windows")]
 #[path = "tray_windows.rs"]
 pub mod tray;
 pub mod ui;
@@ -129,7 +120,7 @@ pub fn run() {
             //
             // On Windows this must happen here, on the main thread: the tray
             // hooks into eframe's own message loop (see tray_windows.rs).
-            #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "tray")))]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             tray::spawn(cc.egui_ctx.clone());
 
             #[cfg(target_os = "linux")]

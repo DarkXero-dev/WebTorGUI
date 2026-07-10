@@ -133,69 +133,9 @@ jobs:
           # it if a future cargo-packager version nests it after all.
           path: target/release/bundle/**/*.exe
 
-  windows7:
-    name: Windows 7 (best-effort)
-    runs-on: windows-latest
-    # Mainline rustc dropped Windows 7 support (std now assumes Windows 10+
-    # on x86_64-pc-windows-msvc). x86_64-win7-windows-msvc keeps targeting
-    # it, but it's tier-3: no prebuilt std, nightly-only, and std has to be
-    # rebuilt from source on every run via -Z build-std. This whole job is
-    # unverified on real Windows 7 hardware - neither CI nor local dev has
-    # any - so a failure here must never block the real Linux/Windows
-    # release.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install nightly Rust with rust-src
-        run: |
-          rustup toolchain install nightly --component rust-src
-          rustup default nightly
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      # --no-default-features drops the embedded-login feature (tao/wry/
-      # WebView2) entirely - WebView2 has had no security updates on
-      # Windows 7 since Jan 2023 and its installer refuses to run there
-      # now. `win7` swaps in src/manual_login.rs's system-browser +
-      # paste-cookie flow instead. See Cargo.toml's [features] block.
-      - name: Build release binary (Win7 target)
-        run: cargo build -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --release --no-default-features --features win7
-
-      - name: Run tests (Win7 target)
-        run: cargo test -Z build-std=std,panic_abort --target x86_64-win7-windows-msvc --release --no-default-features --features win7
-
-      - name: Install mpv via Chocolatey
-        shell: pwsh
-        run: |
-          choco install mpv -y --no-progress
-          $mpvExe = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib" -Filter "mpv.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $mpvExe) { throw "mpv.exe not found anywhere under C:\ProgramData\chocolatey\lib after choco install" }
-          Copy-Item $mpvExe.FullName target/x86_64-win7-windows-msvc/release/mpv.exe
-
-      # No installer for this one yet - cargo-packager/NSIS assume
-      # target/release/, not a custom --target output dir, and this build
-      # is best-effort until it's actually been run on real Windows 7. A
-      # plain zip is enough for now; installer polish is a follow-up once
-      # someone confirms the exe even launches there.
-      - name: Package Win7 build
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist-win7 | Out-Null
-          Copy-Item target/x86_64-win7-windows-msvc/release/webtorapp.exe dist-win7/
-          Copy-Item target/x86_64-win7-windows-msvc/release/mpv.exe dist-win7/
-          Compress-Archive -Path dist-win7/* -DestinationPath webtorapp-windows7.zip
-
-      - name: Upload Win7 build
-        uses: actions/upload-artifact@v4
-        with:
-          name: webtorapp-windows7
-          path: webtorapp-windows7.zip
-
   release:
     name: Publish GitHub Release
-    needs: [linux, windows, windows7]
+    needs: [linux, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -213,16 +153,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: webtorapp-windows
-          path: dist
-
-      # windows7 is continue-on-error and may not have produced this
-      # artifact at all (e.g. build-std failed) - don't let a missing
-      # best-effort artifact block shipping the real release.
-      - name: Download Windows 7 build
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: webtorapp-windows7
           path: dist
 
       - name: Create GitHub Release
