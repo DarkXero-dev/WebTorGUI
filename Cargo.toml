@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "1.0.4"
+version = "1.0.5"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"
@@ -10,9 +10,25 @@ edition = "2021"
 name = "webtorapp"
 path = "src/main.rs"
 
+# The login webview runs in this separate helper process, never in-process:
+# eframe's winit event loop and a second tao/WebView2 event loop in the same
+# process corrupt each other's per-window state and crash inside a window
+# procedure. A dedicated process owns its own true main thread (which
+# winit-family loops require) and shares nothing with the GUI. Only built when
+# embedded-login is on (the win7 build uses the paste flow instead).
+[[bin]]
+name = "webtor-login"
+path = "src/bin/webtor-login.rs"
+required-features = ["embedded-login"]
+
 [lib]
 name = "webtorapp_lib"
 crate-type = ["rlib"]
+
+# Keep line-table debug info in release so a crash inside webtorapp.exe resolves
+# to a symbol instead of a bare address (this bug shipped with none).
+[profile.release]
+debug = 1
 
 [dependencies]
 eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts", "accesskit", "x11", "wayland"] }
@@ -103,7 +119,7 @@ out-dir = "target/release/bundle"
 # can't resolve that import and the installed app can't launch. A no-op on
 # Linux/macOS builds: a resource entry that doesn't exist resolves as a glob
 # with zero matches rather than an error.
-resources = ["target/release/mpv.exe", "target/release/WebView2Loader.dll"]
+resources = ["target/release/mpv.exe", "target/release/WebView2Loader.dll", "target/release/webtor-login.exe"]
 
 [package.metadata.packager.deb]
 desktop-template = "packaging/webtorapp.desktop"

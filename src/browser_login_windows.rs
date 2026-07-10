@@ -1,70 +1,76 @@
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::Sender;
-use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
-use tao::platform::run_return::EventLoopExtRunReturn;
-use tao::platform::windows::EventLoopBuilderExtWindows;
-use tao::window::WindowBuilder;
-use wry::WebViewBuilder;
 
 pub type CookieResult = Result<Vec<(String, String)>, String>;
 
-/// Opens a real, separate browser window (WebView2 via wry) pointed at
-/// webtor.io/login. Our own reqwest client can't get past webtor.io's
-/// Cloudflare bot challenge no matter what headers it sends - a real browser
-/// engine passes it normally. Once the user finishes the email-code login in
-/// this window, the resulting SuperTokens session cookies are read directly
-/// out of it and sent back over `result_tx`.
+/// Windows twin of `browser_login.rs`. Same public shape, same cookie contract.
 ///
-/// The Windows twin of `browser_login.rs`. Same public shape, same cookie
-/// contract; only the windowing differs (WebView2 needs no GTK, and tao's
-/// Windows window is a real HWND that satisfies wry's generic
-/// `HasWindowHandle` build path).
+/// Unlike Linux (where the webkit2gtk webview runs on a background thread inside
+/// this process), the Windows login window runs in a **separate helper process**
+/// (`webtor-login.exe`, installed beside us). Two reasons it cannot run
+/// in-process:
+///
+/// 1. eframe drives a winit event loop on our main thread; a second
+///    tao/WebView2 event loop in the same process corrupts winit's per-window
+///    state and faults inside a window procedure (observed as an access
+///    violation on the login thread the instant the webview started).
+/// 2. winit-family event loops want their process's true main thread. A helper
+///    process gives the webview exactly that, with nothing else contending.
+///
+/// The helper captures the SuperTokens session cookies and writes them to its
+/// stdout; we spawn it, wait, and hand the cookies back over `result_tx` -
+/// identical to what the Linux path sends.
 pub fn open_login_window(result_tx: Sender<CookieResult>) {
     std::thread::spawn(move || {
-        let result = run();
+        let result = run_helper();
         let _ = result_tx.send(result.map_err(|e| e.to_string()));
     });
 }
 
-fn run() -> Result<Vec<(String, String)>> {
-    // The webview runs on a dedicated thread so it doesn't block egui's own
-    // event loop on the main thread - tao normally refuses that for platform
-    // compatibility, so it must be opted into explicitly. Unlike Cocoa (see
-    // src/lib.rs), Win32 has no main-thread-only windowing rule; tao's own
-    // docs note only that the window dies with its thread, which is exactly
-    // what we want once the cookie is captured.
-    let mut event_loop: EventLoop<()> = EventLoopBuilder::new().with_any_thread(true).build();
-    let window = WindowBuilder::new()
-        .with_title("Sign in to webtor.io")
-        .with_inner_size(tao::dpi::LogicalSize::new(480.0, 720.0))
-        .build(&event_loop)
-        .map_err(|e| anyhow!("could not open browser window: {e}"))?;
+/// Marker line the helper prints on success: `WEBTOR_COOKIES <json array>`.
+const COOKIE_PREFIX: &str = "WEBTOR_COOKIES ";
 
-    let webview = WebViewBuilder::new()
-        .with_url("https://webtor.io/login")
-        .build(&window)
-        .map_err(|e| anyhow!("could not create embedded browser: {e}"))?;
+fn run_helper() -> Result<Vec<(String, String)>> {
+    let exe = std::env::current_exe().map_err(|e| anyhow!("cannot locate our own exe: {e}"))?;
+    let helper = exe
+        .parent()
+        .ok_or_else(|| anyhow!("our exe has no parent directory"))?
+        .join("webtor-login.exe");
+    if !helper.exists() {
+        return Err(anyhow!(
+            "login helper missing at {} - reinstall the app",
+            helper.display()
+        ));
+    }
 
-    let mut found: Option<Vec<(String, String)>> = None;
-    event_loop.run_return(|event, _target, control_flow| {
-        *control_flow = ControlFlow::Poll;
+    let output = std::process::Command::new(&helper)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("could not start the login window: {e}"))?
+        .wait_with_output()
+        .map_err(|e| anyhow!("the login window exited abnormally: {e}"))?;
 
-        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
-            *control_flow = ControlFlow::Exit;
-            return;
-        }
+    if !output.status.success() {
+        // The helper prints a human-readable reason to stderr (e.g. the user
+        // closed the window before signing in).
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .last()
+            .unwrap_or("sign-in was cancelled");
+        return Err(anyhow!("{reason}"));
+    }
 
-        if let Ok(cookies) = webview.cookies_for_url("https://webtor.io") {
-            if cookies.iter().any(|c| c.name() == "sAccessToken") {
-                found = Some(cookies.iter().map(|c| (c.name().to_string(), c.value().to_string())).collect());
-                *control_flow = ControlFlow::Exit;
-            }
-        }
-    });
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix(COOKIE_PREFIX))
+        .ok_or_else(|| anyhow!("the login window returned no session"))?;
 
-    drop(webview);
-    drop(window);
-
-    found.ok_or_else(|| anyhow!("window closed before signing in"))
+    let cookies: Vec<(String, String)> =
+        serde_json::from_str(json).map_err(|e| anyhow!("could not read the captured session: {e}"))?;
+    Ok(cookies)
 }
