@@ -21,12 +21,12 @@ pub fn apply(ctx: &Context) {
 
     v.hyperlink_color = CYAN;
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(0xe8, 0x43, 0x93, 55);
-    v.selection.stroke = Stroke::new(1.0, PINK);
+    v.selection.stroke = Stroke::new(1.0_f32, PINK);
 
     v.widgets.active.bg_fill = Color32::from_rgba_unmultiplied(0x80, 0x20, 0x50, 200);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, PINK);
-    v.widgets.active.fg_stroke = Stroke::new(2.0, PINK);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, CYAN);
+    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, PINK);
+    v.widgets.active.fg_stroke = Stroke::new(2.0_f32, PINK);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, CYAN);
 
     v.panel_fill = PANEL;
     v.window_fill = BG;
@@ -39,7 +39,7 @@ pub fn apply(ctx: &Context) {
 pub fn card_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
+        .stroke(Stroke::new(1.0_f32, BORDER))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(egui::Margin::same(14))
 }

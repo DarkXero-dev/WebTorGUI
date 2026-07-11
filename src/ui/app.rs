@@ -987,7 +987,7 @@ impl WebtorApp {
                                 ui.add(
                                     egui::Button::new(RichText::new("Waiting for browser sign-in...").size(16.0).color(super::theme::MUTED))
                                         .fill(Color32::from_gray(32))
-                                        .stroke(Stroke::new(1.0, Color32::from_gray(45)))
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_gray(45)))
                                         .min_size(egui::vec2(content_w, 48.0)),
                                 );
                                 false
@@ -1014,7 +1014,7 @@ impl WebtorApp {
                             ui.add_space(12.0);
                             egui::Frame::new()
                                 .fill(Color32::from_rgb(60, 20, 30))
-                                .stroke(Stroke::new(1.0, super::theme::ERROR))
+                                .stroke(Stroke::new(1.0_f32, super::theme::ERROR))
                                 .corner_radius(CornerRadius::same(6))
                                 .inner_margin(Margin::same(8))
                                 .show(ui, |ui| {
@@ -1436,7 +1436,7 @@ impl WebtorApp {
         if let Some(err) = self.discover_search_error.clone() {
             egui::Frame::new()
                 .fill(Color32::from_rgb(60, 20, 30))
-                .stroke(Stroke::new(1.0, super::theme::ERROR))
+                .stroke(Stroke::new(1.0_f32, super::theme::ERROR))
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(10))
                 .show(ui, |ui| {
@@ -1472,7 +1472,7 @@ impl WebtorApp {
         if let Some(err) = self.discover_manifest_error.clone() {
             egui::Frame::new()
                 .fill(Color32::from_rgb(60, 20, 30))
-                .stroke(Stroke::new(1.0, super::theme::ERROR))
+                .stroke(Stroke::new(1.0_f32, super::theme::ERROR))
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(10))
                 .show(ui, |ui| {
@@ -1507,7 +1507,7 @@ impl WebtorApp {
         if let Some(err) = self.discover_error.clone() {
             egui::Frame::new()
                 .fill(Color32::from_rgb(60, 20, 30))
-                .stroke(Stroke::new(1.0, super::theme::ERROR))
+                .stroke(Stroke::new(1.0_f32, super::theme::ERROR))
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(10))
                 .show(ui, |ui| {
@@ -1721,7 +1721,7 @@ impl WebtorApp {
         ui.vertical_centered(|ui| {
             egui::Frame::new()
                 .fill(Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24))
-                .stroke(Stroke::new(1.0, color))
+                .stroke(Stroke::new(1.0_f32, color))
                 .corner_radius(CornerRadius::same(14))
                 .inner_margin(Margin::symmetric(14, 6))
                 .show(ui, |ui| {
@@ -1833,7 +1833,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(16)),
             )
@@ -1923,7 +1923,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(24)),
             )
@@ -2131,7 +2131,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(16)),
             )
@@ -2572,7 +2572,7 @@ impl WebtorApp {
         if let Some(err) = self.player_error.clone() {
             egui::Frame::new()
                 .fill(Color32::from_rgb(60, 20, 30))
-                .stroke(Stroke::new(1.0, super::theme::ERROR))
+                .stroke(Stroke::new(1.0_f32, super::theme::ERROR))
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::same(10))
                 .show(ui, |ui| {
@@ -2892,7 +2892,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(0)),
             )
@@ -2909,7 +2909,7 @@ impl WebtorApp {
                             let rect = resp.rect;
                             ui.painter().line_segment(
                                 [egui::pos2(rect.left(), rect.bottom() + 2.0), egui::pos2(rect.right(), rect.bottom() + 2.0)],
-                                Stroke::new(2.0, super::theme::PINK),
+                                Stroke::new(2.0_f32, super::theme::PINK),
                             );
                         }
                         resp.clicked()
@@ -2986,7 +2986,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(16)),
             )
@@ -3098,7 +3098,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(0)),
             )
@@ -3115,7 +3115,7 @@ impl WebtorApp {
                             let rect = resp.rect;
                             ui.painter().line_segment(
                                 [egui::pos2(rect.left(), rect.bottom() + 2.0), egui::pos2(rect.right(), rect.bottom() + 2.0)],
-                                Stroke::new(2.0, super::theme::PINK),
+                                Stroke::new(2.0_f32, super::theme::PINK),
                             );
                         }
                         resp.clicked()
@@ -3362,7 +3362,7 @@ impl WebtorApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     egui::Frame::new()
                         .fill(super::theme::CARD)
-                        .stroke(Stroke::new(1.0, super::theme::BORDER))
+                        .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                         .corner_radius(CornerRadius::same(10))
                         .inner_margin(Margin::symmetric(8, 3))
                         .show(ui, |ui| {
@@ -3527,7 +3527,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(24)),
             )
@@ -3599,7 +3599,7 @@ impl WebtorApp {
             .frame(
                 egui::Frame::new()
                     .fill(super::theme::PANEL)
-                    .stroke(Stroke::new(1.0, super::theme::BORDER))
+                    .stroke(Stroke::new(1.0_f32, super::theme::BORDER))
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(24)),
             )
