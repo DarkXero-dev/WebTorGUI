@@ -1,45 +1,27 @@
 pub mod auth;
 // webtor.io's Cloudflare challenge can't be passed by a plain HTTP client,
-// so login happens in a real embedded browser whose cookies we then read.
-// That needs platform-specific windowing - webkit2gtk on Linux, WebView2 on
-// Windows - so this mirrors the `player` split below: two files, one module
-// name, one shared `open_login_window` API, no cfg gates for callers.
+// so login happens in a real embedded browser (webkit2gtk) whose cookies we
+// then read.
 //
-// macOS is still unsupported: the webview runs its own event loop on a
-// background thread, which is a hard incompatibility with Cocoa (macOS
-// requires all windowing on the true main thread). Porting there needs a
-// real multi-viewport redesign, not something to guess at untested.
+// macOS and Windows are unsupported - this app targets Linux only.
 #[cfg(all(target_os = "linux", feature = "embedded-login"))]
 #[path = "browser_login.rs"]
 pub mod browser_login;
-#[cfg(all(target_os = "windows", feature = "embedded-login"))]
-#[path = "browser_login_windows.rs"]
-pub mod browser_login;
 pub mod db;
 pub mod downloads;
-// Embedded video playback (mpv reparented into our own window) needs
-// platform-specific window-handling code - X11 reparenting on Linux, Win32
-// child windows on Windows. Both files expose the same `EmbeddedPlayer`
-// shape, so nothing outside this module needs a cfg gate of its own.
+// Embedded video playback reparents an mpv window into our own X11 window.
 #[cfg(target_os = "linux")]
 #[path = "player.rs"]
-pub mod player;
-#[cfg(target_os = "windows")]
-#[path = "player_windows.rs"]
 pub mod player;
 pub mod settings;
 #[cfg(target_os = "linux")]
 pub mod single_instance;
+pub mod theatre;
 pub mod torrent;
 pub mod torrent_engine;
-// The system tray, like `player` above: two files, one module name, one
-// shared `spawn`/`show_window` API. Linux speaks StatusNotifierItem over
-// D-Bus (ksni); Windows uses the Win32 notification area (tray-icon).
+// The system tray - StatusNotifierItem over D-Bus (ksni).
 #[cfg(target_os = "linux")]
 #[path = "tray.rs"]
-pub mod tray;
-#[cfg(target_os = "windows")]
-#[path = "tray_windows.rs"]
 pub mod tray;
 pub mod ui;
 pub mod webtor_auth;
@@ -117,10 +99,7 @@ pub fn run() {
             // window directly (show/focus/exit) even while it's hidden and
             // its own event loop is otherwise idle - so they get a context
             // clone here rather than going through app-side polling.
-            //
-            // On Windows this must happen here, on the main thread: the tray
-            // hooks into eframe's own message loop (see tray_windows.rs).
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(target_os = "linux")]
             tray::spawn(cc.egui_ctx.clone());
 
             #[cfg(target_os = "linux")]

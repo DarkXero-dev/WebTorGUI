@@ -1,6 +1,6 @@
 [package]
 name = "webtorapp"
-version = "1.0.7"
+version = "1.0.8"
 description = "Webtor Desktop - native premium client for webtor.io"
 authors = ["techxero"]
 license = "MIT"
@@ -10,21 +10,11 @@ edition = "2021"
 name = "webtorapp"
 path = "src/main.rs"
 
-# The login webview runs in this separate helper process, never in-process:
-# eframe's winit event loop and a second tao/WebView2 event loop in the same
-# process corrupt each other's per-window state and crash inside a window
-# procedure. A dedicated process owns its own true main thread (which
-# winit-family loops require) and shares nothing with the GUI.
-[[bin]]
-name = "webtor-login"
-path = "src/bin/webtor-login.rs"
-required-features = ["embedded-login"]
-
 [lib]
 name = "webtorapp_lib"
 crate-type = ["rlib"]
 
-# Keep line-table debug info in release so a crash inside webtorapp.exe resolves
+# Keep line-table debug info in release so a crash inside webtorapp resolves
 # to a symbol instead of a bare address (this bug shipped with none).
 [profile.release]
 debug = 1
@@ -54,43 +44,15 @@ reqwest_cookie_store = { version = "0.8", features = ["serde"] }
 cookie_store = "0.21"
 librqbit = { version = "8.1.1", features = ["http-api", "tracing-subscriber-utils"] }
 percent-encoding = "2.3.2"
-# Needed on every platform now - both player.rs (X11) and player_windows.rs
-# (Win32) get their own window's handle through this crate's traits/types.
+# player.rs gets its own window's handle through this crate's traits/types.
 raw-window-handle = "0.6"
-# The embedded-browser login window (webkit2gtk on Linux, WebView2 on
-# Windows - see src/browser_login.rs / src/browser_login_windows.rs).
+# The embedded-browser login window (webkit2gtk - see src/browser_login.rs).
 tao = { version = "0.35.3", optional = true }
 wry = { version = "0.55", optional = true }
 
 [features]
 default = ["embedded-login"]
 embedded-login = ["dep:tao", "dep:wry"]
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-# The notification-area tray icon (src/tray_windows.rs), mirroring the ksni
-# tray Linux gets. It registers a hidden message window on the thread that
-# already pumps messages - eframe's winit loop - so it must be created on the
-# main thread and never stands up an event loop of its own.
-tray-icon = "0.24.1"
-# Backs player_windows.rs's Win32 child-window embedding (CreateWindowExW,
-# SetParent, SetWindowPos, monitor bounds for native fullscreen). Pinned to
-# match accesskit_windows's own `windows` requirement (a real, unconditional
-# dependency of eframe's accessibility feature on Windows) - a mismatched
-# version here means two distinct, mutually-incompatible `windows_core`
-# crates in the graph, and the generic `Param`/`TypeKind` trait machinery
-# windows-rs relies on for ergonomic argument passing breaks across that
-# boundary (this is exactly what broke the first attempt at this).
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_Graphics_Gdi",
-] }
-
-[target.'cfg(target_os = "windows")'.build-dependencies]
-winresource = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
@@ -102,18 +64,8 @@ name = "WebtorApp"
 identifier = "com.techxero.webtorapp"
 description = "Native premium desktop client for webtor.io"
 homepage = "https://github.com/DarkXero-dev/WebTorGUI"
-icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"]
+icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"]
 out-dir = "target/release/bundle"
-# mpv.exe and WebView2Loader.dll are both fetched/copied by CI
-# (.github/workflows/build.yml, Windows job) and dropped at target/release/
-# before this runs, for the NSIS build to place next to the installed exe.
-# WebView2Loader.dll in particular is a hard runtime dependency of
-# browser_login_windows.rs's login webview (see wry's raw-dylib import of
-# webview2loader.dll) - without a real copy beside webtorapp.exe, Windows
-# can't resolve that import and the installed app can't launch. A no-op on
-# Linux/macOS builds: a resource entry that doesn't exist resolves as a glob
-# with zero matches rather than an error.
-resources = ["target/release/mpv.exe", "target/release/WebView2Loader.dll", "target/release/webtor-login.exe"]
 
 [package.metadata.packager.deb]
 desktop-template = "packaging/webtorapp.desktop"

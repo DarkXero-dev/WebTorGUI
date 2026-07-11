@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Page {
-    Dashboard,
+    Theatre,
     Discover,
     Streaming,
     Downloads,
@@ -20,42 +20,13 @@ pub enum Page {
     Settings,
 }
 
-/// A verified-playable open-content clip, offered as a quick-fill on the
-/// Stream page (not on Discover - Discover mirrors webtor.io's real catalog,
-/// whose titles we can't actually resolve to playable URLs ourselves).
-struct SampleClip {
-    name: &'static str,
-    url: &'static str,
-    size_label: &'static str,
-}
-
-fn sample_clips() -> &'static [SampleClip] {
-    // Every URL here was verified (both `curl` 200 and an actual `mpv` decode/playback
-    // test) - the original googleapis.com "commondatastorage" bucket used in an earlier
-    // pass now returns 403 Forbidden for all of these titles and was replaced.
-    &[
-        SampleClip {
-            name: "Big Buck Bunny",
-            url: "https://media.w3.org/2010/05/bunny/movie.mp4",
-            size_label: "238 MB",
-        },
-        SampleClip {
-            name: "Sintel (trailer)",
-            url: "https://media.w3.org/2010/05/sintel/trailer.mp4",
-            size_label: "4.2 MB",
-        },
-        SampleClip {
-            name: "Tears of Steel",
-            url: "https://media.xiph.org/tearsofsteel/tears_of_steel_1080p.webm",
-            size_label: "545 MB",
-        },
-        SampleClip {
-            name: "Elephants Dream",
-            url: "https://download.blender.org/ED/ED_1024.avi",
-            size_label: "425 MB",
-        },
-    ]
-}
+/// A verified-playable open-content clip, offered as a one-click sample on
+/// the Stream page (not on Discover - Discover mirrors webtor.io's real
+/// catalog, whose titles we can't actually resolve to playable URLs
+/// ourselves). Verified both `curl` 200 and an actual `mpv` decode/playback
+/// test - the original googleapis.com "commondatastorage" bucket used in an
+/// earlier pass now returns 403 Forbidden and was replaced.
+const SAMPLE_CLIP_URL: &str = "https://media.xiph.org/tearsofsteel/tears_of_steel_1080p.webm";
 
 /// One entry from a Discover catalog - same Stremio addon protocol
 /// webtor.io itself uses for its Discover page (Cinemeta by default, or any
@@ -63,6 +34,11 @@ fn sample_clips() -> &'static [SampleClip] {
 #[derive(Clone)]
 struct DiscoverEntry {
     id: String,
+    /// "movie" or "series" - not part of the Stremio meta object itself
+    /// (that's known from the catalog it was fetched under), but baked in
+    /// here so the Theatre page can mix both kinds in one grid and still
+    /// know which one to open the source picker for.
+    kind: String,
     name: String,
     poster: String,
     year: String,
@@ -231,7 +207,7 @@ fn build_catalog_url(base_url: &str, kind: &str, catalog_id: &str, genre: Option
     }
 }
 
-async fn fetch_discover_catalog_entries(url: &str) -> Result<Vec<DiscoverEntry>, String> {
+async fn fetch_discover_catalog_entries(url: &str, kind: &str) -> Result<Vec<DiscoverEntry>, String> {
     let resp = reqwest::get(url).await.map_err(|e| format!("network error: {e}"))?;
     let json: serde_json::Value = resp.json().await.map_err(|e| format!("bad response: {e}"))?;
     let metas = json
@@ -246,14 +222,14 @@ async fn fetch_discover_catalog_entries(url: &str) -> Result<Vec<DiscoverEntry>,
             let poster = m.get("poster")?.as_str()?.to_string();
             let year = m.get("year").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let imdb_rating = m.get("imdbRating").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            Some(DiscoverEntry { id, name, poster, year, imdb_rating })
+            Some(DiscoverEntry { id, kind: kind.to_string(), name, poster, year, imdb_rating })
         })
         .collect::<Vec<_>>();
     Ok(entries)
 }
 
-async fn fetch_discover_catalog(tx: std::sync::mpsc::Sender<Result<Vec<DiscoverEntry>, String>>, url: String) {
-    let _ = tx.send(fetch_discover_catalog_entries(&url).await);
+async fn fetch_discover_catalog(tx: std::sync::mpsc::Sender<Result<Vec<DiscoverEntry>, String>>, url: String, kind: String) {
+    let _ = tx.send(fetch_discover_catalog_entries(&url, &kind).await);
 }
 
 /// Searches every installed Discover addon at once (not just the currently
@@ -279,7 +255,7 @@ async fn search_all_discover_addons(addons: Vec<AddonSource>, kind: String, quer
         };
         any_searchable = true;
         let url = build_catalog_url(&addon.base_url, &kind, &catalog.id, None, 0, Some(&query));
-        match fetch_discover_catalog_entries(&url).await {
+        match fetch_discover_catalog_entries(&url, &kind).await {
             Ok(entries) => {
                 for entry in entries {
                     if seen_ids.insert(entry.id.clone()) {
@@ -412,6 +388,11 @@ struct AddedTorrent {
     /// File indices already moved into their category folder (see
     /// `settings::resolve_dest_dir`) - moved once, not re-checked every frame.
     routed_files: std::collections::HashSet<usize>,
+    /// True while this torrent wants to download but `max_concurrent_downloads`
+    /// has no free slot for it - paused the same as a user-initiated pause,
+    /// but `advance_torrent_slots` (not the user) is what should resume it,
+    /// the moment a slot frees up.
+    awaiting_slot: bool,
 }
 
 /// `AddedTorrent::source_label` is `&'static str` (it's always one of a
@@ -589,11 +570,21 @@ pub struct WebtorApp {
     login_error: Option<String>,
     login_loading: bool,
     webtor_auth: WebtorAuth,
-    #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
+    #[cfg(all(target_os = "linux", feature = "embedded-login"))]
     browser_login_rx: Option<Receiver<crate::browser_login::CookieResult>>,
+
+    /// Titles saved from Discover via the heart icon - `theatre_ids` is just
+    /// for an O(1) "is this already saved" check on every poster card;
+    /// `theatre_catalog` is the full data the Theatre page renders. Kept in
+    /// memory and mutated directly (see `theatre_add`/`theatre_remove`)
+    /// rather than re-querying the db every frame, the same way `torrents`
+    /// works for Downloads.
+    theatre_ids: std::collections::HashSet<String>,
+    theatre_catalog: Vec<DiscoverEntry>,
 
     tray_notice_open: bool,
     never_ask_again_checked: bool,
+    sign_out_confirm_open: bool,
 
     settings_saved: bool,
 
@@ -601,10 +592,6 @@ pub struct WebtorApp {
     magnet_input: String,
     torrents: Vec<AddedTorrent>,
     torrent_add_rx: Vec<Receiver<Result<(crate::torrent_engine::AddedHandle, String, &'static str), String>>>,
-    /// Torrents waiting their turn - a new add starts immediately only if
-    /// nothing else is still downloading, otherwise it queues here and
-    /// `advance_torrent_queue` starts it once the current one finishes.
-    pending_torrent_queue: std::collections::VecDeque<(crate::torrent_engine::AddSource, String, &'static str)>,
     /// Which torrent's file-selection popup is open, keyed by its librqbit id.
     file_picker_torrent_id: Option<usize>,
     /// Which torrent's remove confirmation (keep files vs delete them too)
@@ -624,11 +611,6 @@ pub struct WebtorApp {
 
     stream_input: String,
     now_playing: Option<String>,
-    /// Set only when playback went through a user-chosen external player
-    /// (Windows, see `settings::WindowsPlayerChoice::External`) rather
-    /// than mpv-embedded or the OS-default "Open Externally" handoff -
-    /// distinguishes the three cases for the Now Playing status text.
-    now_playing_external_player: Option<String>,
     playing_embedded: bool,
     player_error: Option<String>,
     own_window_handle: Option<isize>,
@@ -751,8 +733,16 @@ impl WebtorApp {
                     output_dir: added.output_dir,
                     selected_files: None,
                     routed_files,
+                    awaiting_slot: false,
                 }
             })
+            .collect();
+
+        let theatre_rows = crate::theatre::list_all(&db_conn).unwrap_or_default();
+        let theatre_ids: std::collections::HashSet<String> = theatre_rows.iter().map(|r| r.id.clone()).collect();
+        let theatre_catalog: Vec<DiscoverEntry> = theatre_rows
+            .into_iter()
+            .map(|r| DiscoverEntry { id: r.id, kind: r.kind, name: r.name, poster: r.poster, year: r.year, imdb_rating: r.imdb_rating })
             .collect();
 
         let app = Self {
@@ -766,16 +756,18 @@ impl WebtorApp {
             login_error: None,
             login_loading: false,
             webtor_auth,
-            #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
+            #[cfg(all(target_os = "linux", feature = "embedded-login"))]
             browser_login_rx: None,
+            theatre_ids,
+            theatre_catalog,
             tray_notice_open: false,
             never_ask_again_checked: false,
+            sign_out_confirm_open: false,
             settings_saved: false,
             torrent_engine,
             magnet_input: String::new(),
             torrents: restored_torrents,
             torrent_add_rx: Vec::new(),
-            pending_torrent_queue: std::collections::VecDeque::new(),
             file_picker_torrent_id: None,
             remove_confirm_torrent_id: None,
             download_pill_was_active: false,
@@ -785,7 +777,6 @@ impl WebtorApp {
             download_speeds: std::collections::HashMap::new(),
             stream_input: String::new(),
             now_playing: None,
-            now_playing_external_player: None,
             playing_embedded: false,
             player_error: None,
             own_window_handle,
@@ -885,13 +876,14 @@ impl WebtorApp {
     /// this hands off to a real embedded browser window
     /// (`crate::browser_login`) and imports the cookies it captures.
     fn login_page(&mut self, ui: &mut Ui) {
-        #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
+        #[cfg(all(target_os = "linux", feature = "embedded-login"))]
         {
             if let Some(rx) = &self.browser_login_rx {
                 if let Ok(result) = rx.try_recv() {
                     match result {
-                        Ok(cookies) => match self.webtor_auth.import_cookies(cookies) {
+                        Ok(capture) => match self.webtor_auth.import_cookies(capture.cookies) {
                             Ok(()) if self.webtor_auth.has_session() => {
+                                self.webtor_auth.set_profile_scrape(capture.scrape.full_text.as_deref());
                                 self.logged_in = true;
                                 self.login_error = None;
                                 self.login_email = self.webtor_auth.account_label().unwrap_or_else(|| "webtor.io account".to_string());
@@ -974,7 +966,7 @@ impl WebtorApp {
                         ui.separator();
                         ui.add_space(22.0);
 
-                        #[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login"))]
+                        #[cfg(all(target_os = "linux", feature = "embedded-login"))]
                         {
                             ui.label(
                                 RichText::new("webtor.io's bot protection blocks a plain login form here - sign in through a real browser window instead.")
@@ -1009,10 +1001,10 @@ impl WebtorApp {
                                 self.browser_login_rx = Some(rx);
                             }
                         }
-                        #[cfg(not(all(any(target_os = "linux", target_os = "windows"), feature = "embedded-login")))]
+                        #[cfg(not(all(target_os = "linux", feature = "embedded-login")))]
                         {
                             ui.label(
-                                RichText::new("Sign-in isn't available on this platform yet - the login window needs a windowing feature this build doesn't have. Linux and Windows builds support it today.")
+                                RichText::new("Sign-in isn't available on this build - the login window needs the embedded-login feature.")
                                     .size(12.0)
                                     .color(super::theme::MUTED),
                             );
@@ -1058,7 +1050,7 @@ impl WebtorApp {
             (egui_phosphor::regular::DOWNLOAD_SIMPLE, "Downloads", Page::Downloads),
             (egui_phosphor::regular::PLAY_CIRCLE, "Stream", Page::Streaming),
             (egui_phosphor::regular::PUZZLE_PIECE, "Add-ons", Page::AddOns),
-            (egui_phosphor::regular::USER_CIRCLE, "Account", Page::Dashboard),
+            (egui_phosphor::regular::POPCORN, "Theatre", Page::Theatre),
             (egui_phosphor::regular::GEAR, "Settings", Page::Settings),
         ];
 
@@ -1128,12 +1120,7 @@ impl WebtorApp {
                 )
                 .clicked()
             {
-                self.stop_embedded();
-                self.logged_in = false;
-                let _ = webtor_auth::clear_session();
-                self.webtor_auth = WebtorAuth::new().expect("build http client");
-                self.login_email.clear();
-                self.page = Page::Dashboard;
+                self.sign_out_confirm_open = true;
             }
             let name = if self.login_email.len() > 12 {
                 format!("{}…", &self.login_email[..12])
@@ -1145,84 +1132,59 @@ impl WebtorApp {
         });
     }
 
-    // ----------------------------------------------------------- dashboard
+    // ------------------------------------------------------------- theatre
 
-    fn dashboard_page(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Account").size(26.0).strong().color(super::theme::TEXT));
+    /// Watch-later list: titles saved from Discover via the heart icon on
+    /// each poster (see `render_discover_grid`, `theatre_add`). Reuses the
+    /// exact same poster-grid renderer Discover itself uses, just fed
+    /// `self.theatre_catalog` instead of a live catalog fetch - same
+    /// "Find Sources" flow, same heart to un-save.
+    fn theatre_page(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Theatre").size(26.0).strong().color(super::theme::TEXT));
         ui.add_space(4.0);
-        ui.label(RichText::new("Account overview").size(14.0).color(super::theme::MUTED));
-        ui.add_space(24.0);
+        ui.label(RichText::new("Movies and shows you've saved to watch later").size(14.0).color(super::theme::MUTED));
+        ui.add_space(20.0);
 
         self.render_download_progress_pill(ui);
 
-        ui.columns(2, |cols| {
-            super::theme::card_frame().show(&mut cols[0], |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.label(RichText::new("ACCOUNT").size(11.0).color(super::theme::MUTED).strong());
-                ui.add_space(6.0);
-                ui.label(RichText::new(&self.login_email).size(18.0).strong().color(super::theme::TEXT));
-            });
-            super::theme::card_frame().show(&mut cols[1], |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.label(RichText::new("PLAN").size(11.0).color(super::theme::MUTED).strong());
-                ui.add_space(6.0);
-                match self.webtor_auth.plan_label() {
-                    Some(plan) => {
-                        ui.label(
-                            RichText::new(format!("{}  {plan}", egui_phosphor::regular::CROWN))
-                                .size(18.0)
-                                .strong()
-                                .color(super::theme::PINK),
-                        );
-                    }
-                    None => {
-                        ui.label(RichText::new("Signed in").size(18.0).strong().color(super::theme::TEXT));
-                    }
-                }
-            });
-        });
-        ui.add_space(12.0);
-
-        full_card(ui, |ui| {
-            ui.label(RichText::new("SUBSCRIPTION & STORAGE").size(11.0).color(super::theme::MUTED).strong());
-            ui.add_space(10.0);
-            match self.webtor_auth.plan_label() {
-                Some(plan) => {
-                    ui.label(RichText::new(format!("Current plan: {plan}")).size(14.0).color(super::theme::TEXT));
-                }
-                None => {
-                    ui.label(RichText::new("Plan details aren't exposed by webtor.io's session data.").size(13.0).color(super::theme::MUTED));
-                }
-            }
-            ui.add_space(6.0);
-            match self.webtor_auth.storage_usage() {
-                Some((used, total)) => {
-                    ui.label(
-                        RichText::new(format!("Storage used: {} / {}", format_bytes(used), format_bytes(total)))
-                            .size(14.0)
-                            .color(super::theme::TEXT),
-                    );
-                    ui.add_space(6.0);
-                    ui.add(egui::ProgressBar::new(used as f32 / total.max(1) as f32).desired_height(14.0));
-                }
-                None => {
-                    ui.label(RichText::new("Storage used: N/A").size(14.0).color(super::theme::MUTED));
-                }
-            }
-        });
-        ui.add_space(16.0);
-
-        full_card(ui, |ui| {
-            ui.label(RichText::new("STATUS").size(11.0).color(super::theme::MUTED).strong());
-            ui.add_space(8.0);
+        if self.theatre_catalog.is_empty() {
             ui.label(
-                RichText::new(
-                    "Real BitTorrent engine active - magnets and .torrent files download and stream for real, piece-by-piece, right from this app.",
-                )
-                .size(13.0)
-                .color(super::theme::TEXT),
+                RichText::new("Nothing saved yet - tap the heart on a title in Discover to add it here.")
+                    .size(14.0)
+                    .color(super::theme::MUTED),
             );
-        });
+            return;
+        }
+
+        let entries = self.theatre_catalog.clone();
+        self.render_discover_grid(ui, &entries);
+    }
+
+    /// Saves a title to the Theatre list - a no-op if it's already saved.
+    /// Newest first, matching `theatre::list_all`'s own ordering, so the
+    /// in-memory list never needs a fresh db read after this.
+    fn theatre_add(&mut self, entry: DiscoverEntry) {
+        if !self.theatre_ids.insert(entry.id.clone()) {
+            return;
+        }
+        let _ = crate::theatre::add(
+            &self.db_conn,
+            &crate::theatre::TheatreEntry {
+                id: entry.id.clone(),
+                kind: entry.kind.clone(),
+                name: entry.name.clone(),
+                poster: entry.poster.clone(),
+                year: entry.year.clone(),
+                imdb_rating: entry.imdb_rating.clone(),
+            },
+        );
+        self.theatre_catalog.insert(0, entry);
+    }
+
+    fn theatre_remove(&mut self, id: &str) {
+        self.theatre_ids.remove(id);
+        let _ = crate::theatre::remove(&self.db_conn, id);
+        self.theatre_catalog.retain(|e| e.id != id);
     }
 
     // ------------------------------------------------------------- discover
@@ -1241,7 +1203,7 @@ impl WebtorApp {
     fn trigger_discover_fetch(&mut self, base_url: &str) {
         let url = build_catalog_url(base_url, self.discover_type.as_str(), &self.discover_catalog_id, self.discover_genre.as_deref(), self.discover_skip, None);
         let (tx, rx) = std::sync::mpsc::channel();
-        tokio::spawn(fetch_discover_catalog(tx, url));
+        tokio::spawn(fetch_discover_catalog(tx, url, self.discover_type.as_str().to_string()));
         self.discover_rx = Some(rx);
         self.discover_loading = true;
         self.discover_error = None;
@@ -1561,30 +1523,41 @@ impl WebtorApp {
         self.discover_pagination_row(ui, &addon.base_url);
     }
 
-    /// The poster grid shared by normal catalog browsing and search results -
-    /// takes `entries` directly rather than always reading `self.discover_catalog`
-    /// so search results (merged from every installed addon, not paginated)
-    /// can reuse the exact same rendering.
+    /// The poster grid shared by normal catalog browsing, search results,
+    /// and the Theatre page - takes `entries` directly rather than always
+    /// reading `self.discover_catalog` so all three can reuse the exact
+    /// same rendering (search results are merged from every installed addon
+    /// and not paginated; Theatre reads from `self.theatre_catalog`).
     fn render_discover_grid(&mut self, ui: &mut Ui, entries: &[DiscoverEntry]) {
-        const COLS: usize = 4;
+        // Column count scales with available width instead of staying fixed
+        // - a fixed count just stretched each poster wider (and taller,
+        // since poster_h follows poster_w) on a bigger/fullscreen window,
+        // to the point of pushing a card's own title/button out of view.
+        // Targeting a fixed column width and deriving the count from that
+        // keeps posters roughly the same size and fits more per row instead.
+        const TARGET_COL_W: f32 = 250.0;
         let spacing = ui.spacing().item_spacing.x;
-        let col_w = (ui.available_width() - spacing * (COLS as f32 - 1.0)) / COLS as f32;
+        let avail_w = ui.available_width();
+        let num_cols = (((avail_w + spacing) / (TARGET_COL_W + spacing)).floor() as usize).max(2);
+        let col_w = (avail_w - spacing * (num_cols as f32 - 1.0)) / num_cols as f32;
         let poster_w = col_w - 28.0; // minus card_frame's inner margin (14 each side)
         let poster_h = poster_w * 1.5; // standard poster aspect ratio, same box for every card
 
         let stream_addons = self.settings.lock().unwrap().stream_addons.clone();
-        let discover_kind = self.discover_type.as_str().to_string();
+        let theatre_ids = self.theatre_ids.clone();
         let mut open_picker_for: Option<(String, String, String)> = None; // (title, kind, id)
+        let mut theatre_add: Option<DiscoverEntry> = None;
+        let mut theatre_remove: Option<String> = None;
 
         egui::ScrollArea::vertical().max_height(ui.available_height() - 60.0).show(ui, |ui| {
             // `ui.columns` tracks each column's height independently, so a
             // single call spanning the whole catalog drifts out of row
             // alignment the moment card heights differ (e.g. a wrapped
-            // title) or the item count isn't a multiple of COLS - columns
-            // run dry at different points and later rows show blank gaps.
-            // Calling it fresh per row resets that alignment every time.
-            for row in entries.chunks(COLS) {
-                ui.columns(COLS, |cols| {
+            // title) or the item count isn't a multiple of num_cols -
+            // columns run dry at different points and later rows show blank
+            // gaps. Calling it fresh per row resets that alignment every time.
+            for row in entries.chunks(num_cols) {
+                ui.columns(num_cols, |cols| {
                     for (i, item) in row.iter().enumerate() {
                         super::theme::card_frame().show(&mut cols[i], |ui| {
                             ui.set_width(poster_w);
@@ -1595,7 +1568,7 @@ impl WebtorApp {
                             // "broken image" triangle would otherwise show.
                             let poster_broken = item.poster.is_empty()
                                 || ui.ctx().try_load_image(&item.poster, egui::SizeHint::default()).is_err();
-                            if poster_broken {
+                            let image_rect = if poster_broken {
                                 // Reserve the exact same box a real poster
                                 // would take up, so a title with no
                                 // thumbnail doesn't collapse the card down
@@ -1604,14 +1577,48 @@ impl WebtorApp {
                                 let (rect, _) = ui.allocate_exact_size(egui::vec2(poster_w, poster_h), egui::Sense::hover());
                                 ui.painter().rect_filled(rect, CornerRadius::same(8), Color32::from_gray(35));
                                 ui.painter().text(rect.center(), Align2::CENTER_CENTER, "N/A", FontId::proportional(18.0), super::theme::MUTED);
+                                rect
                             } else {
                                 ui.add(
                                     egui::Image::new(&item.poster)
                                         .fit_to_exact_size(egui::vec2(poster_w, poster_h))
                                         .corner_radius(CornerRadius::same(8))
                                         .show_loading_spinner(true),
-                                );
+                                )
+                                .rect
+                            };
+
+                            // Heart overlay in the poster's top-right
+                            // corner - filled pink when already saved to
+                            // Theatre, outline otherwise. Same glyph either
+                            // way (only the Regular icon variant is loaded
+                            // into the font atlas), color carries the state.
+                            let in_theatre = theatre_ids.contains(&item.id);
+                            let heart_size = 26.0;
+                            let heart_rect = egui::Rect::from_min_size(
+                                egui::pos2(image_rect.max.x - heart_size - 6.0, image_rect.min.y + 6.0),
+                                egui::vec2(heart_size, heart_size),
+                            );
+                            let heart_resp = ui.interact(heart_rect, ui.id().with(("theatre_heart", &item.id)), egui::Sense::click());
+                            ui.painter().circle_filled(heart_rect.center(), heart_size / 2.0, Color32::from_black_alpha(170));
+                            ui.painter().text(
+                                heart_rect.center(),
+                                Align2::CENTER_CENTER,
+                                egui_phosphor::regular::HEART,
+                                FontId::proportional(15.0),
+                                if in_theatre { super::theme::PINK } else { Color32::WHITE },
+                            );
+                            if heart_resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
+                            if heart_resp.clicked() {
+                                if in_theatre {
+                                    theatre_remove = Some(item.id.clone());
+                                } else {
+                                    theatre_add = Some(item.clone());
+                                }
+                            }
+
                             ui.add_space(8.0);
                             // Wrapping to 2 lines for longer titles made
                             // cards in the same row different heights -
@@ -1645,7 +1652,7 @@ impl WebtorApp {
                                     )
                                     .clicked()
                                 {
-                                    open_picker_for = Some((item.name.clone(), discover_kind.clone(), item.id.clone()));
+                                    open_picker_for = Some((item.name.clone(), item.kind.clone(), item.id.clone()));
                                 }
                             });
                         });
@@ -1659,6 +1666,12 @@ impl WebtorApp {
             if let Some(addon) = stream_addons.first() {
                 self.open_source_picker(title, kind, id, addon.base_url.clone());
             }
+        }
+        if let Some(entry) = theatre_add {
+            self.theatre_add(entry);
+        }
+        if let Some(id) = theatre_remove {
+            self.theatre_remove(&id);
         }
     }
 
@@ -1773,37 +1786,12 @@ impl WebtorApp {
         }
         let title = magnet_display_name(&self.magnet_input);
         let magnet = self.magnet_input.clone();
-        self.queue_torrent_source(crate::torrent_engine::AddSource::MagnetOrUrl(magnet), title, "Magnet link");
+        self.start_torrent_source(crate::torrent_engine::AddSource::MagnetOrUrl(magnet), title, "Magnet link");
         self.magnet_input.clear();
     }
 
     fn add_magnet_titled(&mut self, title: String, magnet: String) {
-        self.queue_torrent_source(crate::torrent_engine::AddSource::MagnetOrUrl(magnet), title, "Stream source");
-    }
-
-    /// Starts a torrent right away if nothing else is currently downloading,
-    /// otherwise queues it - so adding several titles back to back downloads
-    /// them one at a time instead of all fighting over the same bandwidth.
-    fn queue_torrent_source(&mut self, source: crate::torrent_engine::AddSource, title: String, source_label: &'static str) {
-        let anything_active = !self.torrent_add_rx.is_empty() || self.torrents.iter().any(|t| !t.handle.stats().finished);
-        if anything_active {
-            self.notice = Some(format!("Queued \"{title}\" - starts once the current download finishes."));
-            self.pending_torrent_queue.push_back((source, title, source_label));
-        } else {
-            self.start_torrent_source(source, title, source_label);
-        }
-    }
-
-    /// Starts the next queued torrent once nothing else is actively
-    /// downloading. Called every frame `downloads_page` is visible.
-    fn advance_torrent_queue(&mut self) {
-        let anything_active = !self.torrent_add_rx.is_empty() || self.torrents.iter().any(|t| !t.handle.stats().finished);
-        if anything_active {
-            return;
-        }
-        if let Some((source, title, source_label)) = self.pending_torrent_queue.pop_front() {
-            self.start_torrent_source(source, title, source_label);
-        }
+        self.start_torrent_source(crate::torrent_engine::AddSource::MagnetOrUrl(magnet), title, "Stream source");
     }
 
     /// A themed modal for picking which files in a torrent actually
@@ -1812,6 +1800,12 @@ impl WebtorApp {
     /// inline expandable list this used to be.
     fn render_file_picker_popup(&mut self, ui: &mut Ui) {
         let Some(torrent_id) = self.file_picker_torrent_id else { return };
+        let max_concurrent = self.settings.lock().unwrap().max_concurrent_downloads.max(1) as usize;
+        let active_count = self
+            .torrents
+            .iter()
+            .filter(|t| t.id != torrent_id && !t.handle.stats().finished && !t.handle.is_paused())
+            .count();
         let Some(t) = self.torrents.iter_mut().find(|t| t.id == torrent_id) else {
             self.file_picker_torrent_id = None;
             return;
@@ -1899,7 +1893,11 @@ impl WebtorApp {
             });
 
         if !open || done_clicked {
-            self.torrent_engine.start_download(t.handle.clone());
+            if active_count < max_concurrent {
+                self.torrent_engine.start_download(t.handle.clone());
+            } else {
+                t.awaiting_slot = true;
+            }
             self.file_picker_torrent_id = None;
         }
     }
@@ -2062,6 +2060,7 @@ impl WebtorApp {
                         output_dir: added.output_dir,
                         selected_files: None,
                         routed_files: std::collections::HashSet::new(),
+                        awaiting_slot: false,
                     });
                 }
                 Ok(Err(e)) => self.notice = Some(format!("Couldn't add torrent: {e}")),
@@ -2073,6 +2072,23 @@ impl WebtorApp {
                     self.notice = Some("Couldn't add torrent: the add task ended unexpectedly.".to_string());
                 }
             }
+        }
+    }
+
+    /// Starts torrents that are `awaiting_slot` once `max_concurrent_downloads`
+    /// has room for them - a torrent finishing, being paused, or being removed
+    /// all free up a slot, so this just re-checks every frame rather than
+    /// hooking each of those individually.
+    fn advance_torrent_slots(&mut self) {
+        let max = self.settings.lock().unwrap().max_concurrent_downloads.max(1) as usize;
+        loop {
+            let active = self.torrents.iter().filter(|t| !t.handle.stats().finished && !t.handle.is_paused()).count();
+            if active >= max {
+                break;
+            }
+            let Some(t) = self.torrents.iter_mut().find(|t| t.awaiting_slot) else { break };
+            t.awaiting_slot = false;
+            self.torrent_engine.start_download(t.handle.clone());
         }
     }
 
@@ -2208,13 +2224,13 @@ impl WebtorApp {
             return;
         };
         let title = torrent::parse_torrent_file(&bytes).map(|m| m.name).unwrap_or_else(|_| "Uploaded torrent".to_string());
-        self.queue_torrent_source(crate::torrent_engine::AddSource::TorrentBytes(bytes), title, "Uploaded .torrent");
+        self.start_torrent_source(crate::torrent_engine::AddSource::TorrentBytes(bytes), title, "Uploaded .torrent");
     }
 
     fn downloads_page(&mut self, ui: &mut Ui) {
         self.poll_torrent_adds();
-        self.advance_torrent_queue();
-        if !self.torrent_add_rx.is_empty() || !self.pending_torrent_queue.is_empty() {
+        self.advance_torrent_slots();
+        if !self.torrent_add_rx.is_empty() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
         }
         if self.file_picker_torrent_id.is_some() {
@@ -2262,6 +2278,8 @@ impl WebtorApp {
                 ui.add_space(10.0);
                 let mut to_stream: Option<String> = None;
                 let mut any_live = false;
+                let max_concurrent = self.settings.lock().unwrap().max_concurrent_downloads.max(1) as usize;
+                let mut active_count = self.torrents.iter().filter(|t| !t.handle.stats().finished && !t.handle.is_paused()).count();
                 for t in self.torrents.iter_mut() {
                     let stats = t.handle.stats();
                     let file_infos = t.handle.with_metadata(|meta| meta.file_infos.clone()).ok();
@@ -2299,10 +2317,18 @@ impl WebtorApp {
                                         .add(egui::Button::new(RichText::new(format!("{} Resume", egui_phosphor::regular::PLAY)).color(Color32::from_rgb(20, 8, 14))).fill(super::theme::PINK))
                                         .clicked()
                                     {
-                                        self.torrent_engine.start_download(t.handle.clone());
+                                        if active_count < max_concurrent {
+                                            self.torrent_engine.start_download(t.handle.clone());
+                                            t.awaiting_slot = false;
+                                            active_count += 1;
+                                        } else {
+                                            t.awaiting_slot = true;
+                                        }
                                     }
                                 } else if ui.button(format!("{} Pause", egui_phosphor::regular::PAUSE)).clicked() {
                                     self.torrent_engine.pause_download(t.handle.clone());
+                                    t.awaiting_slot = false;
+                                    active_count = active_count.saturating_sub(1);
                                 }
                             }
                             if let Some((file_id, _)) = video_file {
@@ -2321,6 +2347,15 @@ impl WebtorApp {
                         });
                     });
                     ui.add_space(6.0);
+
+                    if t.awaiting_slot {
+                        ui.label(
+                            RichText::new(format!("{} Queued - waiting for a download slot", egui_phosphor::regular::CLOCK))
+                                .size(12.0)
+                                .color(super::theme::MUTED),
+                        );
+                        ui.add_space(4.0);
+                    }
 
                     if let Some(err) = &stats.error {
                         ui.label(RichText::new(format!("Error: {err}")).size(12.0).color(super::theme::ERROR));
@@ -2383,7 +2418,7 @@ impl WebtorApp {
                     }
                     ui.add_space(10.0);
                 }
-                if any_live {
+                if any_live || self.torrents.iter().any(|t| t.awaiting_slot) {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                 }
                 if let Some(url) = to_stream {
@@ -2391,17 +2426,6 @@ impl WebtorApp {
                     self.stream_input = url;
                     self.playing_embedded = true;
                     self.page = Page::Streaming;
-                }
-
-                if !self.pending_torrent_queue.is_empty() {
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-                    ui.label(RichText::new(format!("UP NEXT ({})", self.pending_torrent_queue.len())).size(11.0).color(super::theme::MUTED).strong());
-                    ui.add_space(6.0);
-                    for (_, title, _) in &self.pending_torrent_queue {
-                        ui.label(RichText::new(format!("{} {title}", egui_phosphor::regular::CLOCK)).size(13.0).color(super::theme::MUTED));
-                    }
                 }
             }
         });
@@ -2511,45 +2535,12 @@ impl WebtorApp {
         self.playing_embedded = false;
     }
 
-    fn play_external(&mut self) {
-        self.stop_embedded();
-        self.player_error = None;
-        let target = self.stream_input.trim().to_string();
-        if target.is_empty() {
-            self.player_error = Some("Enter a URL or file path first.".to_string());
-            return;
-        }
-        match open::that(&target) {
-            Ok(()) => {
-                self.now_playing_external_player = None;
-                self.now_playing = Some(target);
-            }
-            Err(e) => self.player_error = Some(format!("Could not open player: {e}")),
-        }
-    }
-
     fn play_embedded_at(&mut self, x: i32, y: i32, w: u32, h: u32) {
         self.player_error = None;
         let target = self.stream_input.trim().to_string();
         if target.is_empty() {
             self.player_error = Some("Enter a URL or file path first.".to_string());
             return;
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let choice = self.settings.lock().unwrap().windows_player_choice.clone();
-            if let Some(settings::WindowsPlayerChoice::External(player_path)) = choice {
-                match std::process::Command::new(&player_path).arg(&target).spawn() {
-                    Ok(_) => {
-                        self.playing_embedded = false;
-                        self.now_playing_external_player = Some(player_path);
-                        self.now_playing = Some(target);
-                    }
-                    Err(e) => self.player_error = Some(format!("Could not start {player_path}: {e}")),
-                }
-                return;
-            }
         }
 
         let Some(parent_handle) = self.own_window_handle else {
@@ -2560,7 +2551,6 @@ impl WebtorApp {
             Ok(player) => {
                 self.embedded = Some(player);
                 self.playing_embedded = true;
-                self.now_playing_external_player = None;
                 self.now_playing = Some(target);
             }
             Err(e) => self.player_error = Some(format!("Could not start embedded playback: {e}")),
@@ -2602,14 +2592,11 @@ impl WebtorApp {
                     .hint_text("https://... or /path/to/file.mkv"),
             );
             ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 if ui.button("Browse local file").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         self.stream_input = path.to_string_lossy().to_string();
                     }
-                }
-                if ui.button(format!("{} Open Externally", egui_phosphor::regular::ARROW_SQUARE_OUT)).clicked() {
-                    self.play_external();
                 }
                 if ui
                     .add(
@@ -2618,29 +2605,33 @@ impl WebtorApp {
                     )
                     .clicked()
                 {
-                    // Actual geometry is computed below, once the video area is laid out this frame.
+                    // Stop whatever's already playing first - otherwise the
+                    // play-gate below (`self.embedded.is_none()`) never
+                    // fires while a player is running, and this new source
+                    // silently never loads. Actual geometry is computed
+                    // below, once the video area is laid out this frame.
+                    self.stop_embedded();
                     self.playing_embedded = true;
                 }
-            });
-            ui.add_space(10.0);
-            ui.label(RichText::new("TRY A VERIFIED SAMPLE").size(10.5).color(super::theme::MUTED));
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                for clip in sample_clips() {
-                    if ui.button(format!("{} ({})", clip.name, clip.size_label)).clicked() {
-                        self.stream_input = clip.url.to_string();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Play Sample").clicked() {
+                        self.stop_embedded();
+                        self.stream_input = SAMPLE_CLIP_URL.to_string();
+                        self.playing_embedded = true;
                     }
-                }
+                });
             });
         });
         ui.add_space(16.0);
 
-        // Embedded video area: full width, 16:9 (capped), directly above the Now Playing bar.
-        // The cap also accounts for remaining window height so the Now Playing
-        // card below it never gets pushed past the visible area on a short window.
+        // Embedded video area: full width, 16:9 at most, directly above the
+        // Now Playing bar. No fixed pixel cap - it grows with the window
+        // (fullscreen included) right up to whatever height still leaves
+        // `now_playing_reserve` clear for the card below, so it never
+        // scrolls or gets hidden.
         let now_playing_reserve = 100.0;
         let avail_w = ui.available_width();
-        let video_h = (avail_w * 9.0 / 16.0).min(420.0).min((ui.available_height() - now_playing_reserve).max(120.0));
+        let video_h = (avail_w * 9.0 / 16.0).min((ui.available_height() - now_playing_reserve).max(120.0));
         let (video_rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, video_h), egui::Sense::hover());
         ui.painter().rect_filled(video_rect, CornerRadius::same(10), Color32::from_rgb(0x05, 0x08, 0x10));
 
@@ -2702,17 +2693,26 @@ impl WebtorApp {
             ui.add_space(8.0);
             match &self.now_playing {
                 Some(target) => {
-                    ui.label(RichText::new(target).size(14.0).color(super::theme::TEXT));
+                    // mpv's own media-title (an embedded tag if the file has
+                    // one, else just its filename) - falls back to the raw
+                    // path/URL until mpv actually reports it, a moment after
+                    // playback starts.
+                    let title = self.embedded.as_ref().and_then(|p| p.media_title());
+                    ui.label(RichText::new(title.unwrap_or(target)).size(14.0).color(super::theme::TEXT));
                     ui.add_space(4.0);
-                    let status = match (&self.now_playing_external_player, self.playing_embedded) {
-                        (Some(player_path), _) => format!(
-                            "Playing externally via {} - opened in its own window, not embedded.",
-                            std::path::Path::new(player_path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| player_path.clone())
-                        ),
-                        (None, true) => "Playing embedded via mpv.".to_string(),
-                        (None, false) => "Handed off to your system's default player.".to_string(),
-                    };
-                    ui.label(RichText::new(status).size(12.0).color(super::theme::MUTED));
+                    let mut meta = Vec::new();
+                    if let Some(player) = &self.embedded {
+                        if let Some((w, h)) = player.resolution() {
+                            meta.push(format!("{w}x{h}"));
+                        }
+                        if let Some(duration) = player.duration_label() {
+                            meta.push(duration);
+                        }
+                    }
+                    meta.push(
+                        if self.playing_embedded { "Playing embedded via mpv." } else { "Handed off to your system's default player." }.to_string(),
+                    );
+                    ui.label(RichText::new(meta.join("  ·  ")).size(12.0).color(super::theme::MUTED));
                 }
                 None => {
                     ui.label(RichText::new("Nothing playing yet - paste a source above, or pick one from Discover.").size(13.0).color(super::theme::MUTED));
@@ -3150,7 +3150,20 @@ impl WebtorApp {
         let addons = self.settings.lock().unwrap().discover_addons.clone();
         let mut to_remove: Option<usize> = None;
         let mut to_activate: Option<usize> = None;
-        for (i, a) in addons.iter().enumerate() {
+        // Built-in sources first (Cinemeta, etc.), then a separator, then
+        // whatever the user added themselves - keeps the defaults from
+        // getting lost in the middle of a growing custom list.
+        let (built_in, custom): (Vec<(usize, &AddonSource)>, Vec<(usize, &AddonSource)>) =
+            addons.iter().enumerate().partition(|(_, a)| a.built_in);
+        let built_in_count = built_in.len();
+        let ordered: Vec<(usize, &AddonSource)> = built_in.into_iter().chain(custom).collect();
+        for (idx, (i, a)) in ordered.iter().enumerate() {
+            if idx == built_in_count && built_in_count > 0 && idx < ordered.len() {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(8.0);
+            }
+            let i = *i;
             addon_row_frame(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
@@ -3240,7 +3253,19 @@ impl WebtorApp {
             ui.add_space(10.0);
         } else {
             let mut to_remove: Option<usize> = None;
-            for (i, a) in stream_addons.iter().enumerate() {
+            // Built-in sources first (Torrentio), then a separator, then
+            // whatever the user added themselves.
+            let (built_in, custom): (Vec<(usize, &AddonSource)>, Vec<(usize, &AddonSource)>) =
+                stream_addons.iter().enumerate().partition(|(_, a)| a.built_in);
+            let built_in_count = built_in.len();
+            let ordered: Vec<(usize, &AddonSource)> = built_in.into_iter().chain(custom).collect();
+            for (idx, (i, a)) in ordered.iter().enumerate() {
+                if idx == built_in_count && built_in_count > 0 && idx < ordered.len() {
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                }
+                let i = *i;
                 addon_row_frame(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
@@ -3248,7 +3273,7 @@ impl WebtorApp {
                             ui.label(RichText::new(&a.base_url).size(11.0).color(super::theme::MUTED));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(egui_phosphor::regular::TRASH).clicked() {
+                            if !a.built_in && ui.button(egui_phosphor::regular::TRASH).clicked() {
                                 to_remove = Some(i);
                             }
                         });
@@ -3447,14 +3472,14 @@ impl WebtorApp {
     /// then `remembered_close_action` just does that from now on.
     fn handle_tray_and_close(&mut self, ctx: &egui::Context) {
         // Minimize-to-tray only makes sense where there's an actual tray
-        // icon to bring it back from - Linux and Windows (see crate::tray).
+        // icon to bring it back from (see crate::tray, Linux only).
         // Elsewhere, closing the window really closes the app.
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(not(target_os = "linux"))]
         {
             let _ = ctx;
             return;
         }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
             if self.tray_notice_open {
                 return;
@@ -3478,19 +3503,24 @@ impl WebtorApp {
         }
     }
 
-    /// One-time popup, Windows only: mpv (bundled) is the only player
-    /// `player_windows.rs` can actually embed - offer a way out for anyone
-    /// who'd rather use a different player, understanding it'll open
-    /// externally (its own window) rather than embedded in this one.
-    /// Never shows again once `windows_player_choice` is `Some(_)`.
-    #[cfg(target_os = "windows")]
-    fn render_player_choice_popup(&mut self, ctx: &egui::Context) {
-        if self.settings.lock().unwrap().windows_player_choice.is_some() {
+    /// Actually signs out - only called once the confirm popup below gets a yes.
+    fn perform_sign_out(&mut self) {
+        self.stop_embedded();
+        self.logged_in = false;
+        let _ = webtor_auth::clear_session();
+        self.webtor_auth = WebtorAuth::new().expect("build http client");
+        self.login_email.clear();
+        self.page = Page::Theatre;
+    }
+
+    fn render_sign_out_confirm_popup(&mut self, ctx: &egui::Context) {
+        if !self.sign_out_confirm_open {
             return;
         }
-        let content_w = 420.0_f32;
-        let mut resolved: Option<settings::WindowsPlayerChoice> = None;
-        egui::Window::new("Webtor Desktop")
+        let content_w = 340.0_f32;
+        let mut open = true;
+        let mut confirmed = false;
+        egui::Window::new("Sign Out?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -3501,70 +3531,51 @@ impl WebtorApp {
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(Margin::same(24)),
             )
+            .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_width(content_w);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(egui_phosphor::regular::PLAY_CIRCLE).size(32.0).color(super::theme::PINK));
+                    ui.label(RichText::new(egui_phosphor::regular::SIGN_OUT).size(32.0).color(super::theme::PINK));
                     ui.add_space(10.0);
-                    ui.label(RichText::new("Video Playback").size(15.0).strong().color(super::theme::TEXT));
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(
-                            "Webtor Desktop uses mpv (bundled with this install) for in-app embedded video playback. \
-                             Prefer a different player? It'll open as its own separate window instead of embedded here.",
-                        )
-                        .size(13.0)
-                        .color(super::theme::MUTED),
-                    );
+                    ui.label(RichText::new("Sign out of your webtor.io account?").size(14.0).color(super::theme::TEXT));
                 });
                 ui.add_space(16.0);
                 ui.columns(2, |cols| {
-                    // ui.columns forces a left-aligned layout that Button
-                    // inherits for its own text - recenter explicitly so
-                    // labels aren't pinned left of a full-width button.
                     cols[0].with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(RichText::new("Use Bundled mpv").color(Color32::from_rgb(20, 8, 14)))
-                                    .fill(super::theme::PINK)
-                                    .corner_radius(CornerRadius::same(8))
-                                    .min_size(egui::vec2(ui.available_width(), 34.0)),
-                            )
-                            .clicked()
-                        {
-                            resolved = Some(settings::WindowsPlayerChoice::BundledMpv);
-                        }
-                    });
-                    cols[1].with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("Use a Different Player").color(super::theme::TEXT))
+                                egui::Button::new(RichText::new("Cancel").color(super::theme::TEXT))
                                     .fill(Color32::from_gray(45))
                                     .corner_radius(CornerRadius::same(8))
                                     .min_size(egui::vec2(ui.available_width(), 34.0)),
                             )
                             .clicked()
                         {
-                            // Cancelling the picker falls back to bundled
-                            // mpv rather than leaving this unresolved -
-                            // otherwise the popup would nag every launch
-                            // just because they backed out once.
-                            resolved = Some(
-                                rfd::FileDialog::new()
-                                    .add_filter("Executable", &["exe"])
-                                    .pick_file()
-                                    .map(|p| settings::WindowsPlayerChoice::External(p.to_string_lossy().to_string()))
-                                    .unwrap_or(settings::WindowsPlayerChoice::BundledMpv),
-                            );
+                            self.sign_out_confirm_open = false;
+                        }
+                    });
+                    cols[1].with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Sign Out").color(Color32::from_rgb(20, 8, 14)))
+                                    .fill(super::theme::ERROR)
+                                    .corner_radius(CornerRadius::same(8))
+                                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+                            )
+                            .clicked()
+                        {
+                            confirmed = true;
                         }
                     });
                 });
             });
 
-        if let Some(choice) = resolved {
-            let mut settings = self.settings.lock().unwrap();
-            settings.windows_player_choice = Some(choice);
-            let _ = save_settings(&settings);
+        if !open {
+            self.sign_out_confirm_open = false;
+        }
+        if confirmed {
+            self.sign_out_confirm_open = false;
+            self.perform_sign_out();
         }
     }
 
@@ -3669,8 +3680,7 @@ impl eframe::App for WebtorApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.render_tray_notice(&ui.ctx().clone());
-        #[cfg(target_os = "windows")]
-        self.render_player_choice_popup(&ui.ctx().clone());
+        self.render_sign_out_confirm_popup(&ui.ctx().clone());
         self.drain_download_events();
 
         if !self.logged_in {
@@ -3693,7 +3703,7 @@ impl eframe::App for WebtorApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(super::theme::BG).inner_margin(Margin::same(24)))
             .show_inside(ui, |ui| match self.page {
-                Page::Dashboard => self.dashboard_page(ui),
+                Page::Theatre => self.theatre_page(ui),
                 Page::Discover => self.discover_page(ui),
                 Page::Streaming => self.streaming_page(ui),
                 Page::Downloads => self.downloads_page(ui),

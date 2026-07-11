@@ -60,82 +60,15 @@ jobs:
         with:
           name: webtorapp-linux
           # cargo-packager drops the .deb straight into bundle/, not a
-          # bundle/deb/ subfolder (same gotcha the Windows NSIS installer
-          # hit) - the recursive glob also covers it if a future
-          # cargo-packager version nests it after all.
+          # bundle/deb/ subfolder - the recursive glob also covers it if a
+          # future cargo-packager version nests it after all.
           path: |
             target/release/bundle/**/*.deb
             target/generate-rpm/*.rpm
 
-  windows:
-    name: Windows (installer)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Run tests
-        run: cargo test --release
-
-      # Bundled with the app - embedded playback shells out to it via --wid.
-      # sourceforge.net (mpv's usual Windows build host) sits behind a
-      # Cloudflare JS challenge that a plain Invoke-WebRequest can't pass,
-      # so this uses Chocolatey instead - already preinstalled on
-      # windows-latest runners, and built for exactly this kind of
-      # unattended CI install.
-      - name: Install mpv via Chocolatey
-        shell: pwsh
-        run: |
-          choco install mpv -y --no-progress
-          # The `mpv` package is a thin wrapper - the actual binary gets
-          # extracted by its `mpvio.install` dependency into a sibling
-          # package folder, not lib\mpv itself. Search the whole lib tree
-          # rather than hardcoding which package owns the real exe.
-          $mpvExe = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib" -Filter "mpv.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $mpvExe) { throw "mpv.exe not found anywhere under C:\ProgramData\chocolatey\lib after choco install" }
-          Write-Host "Found mpv.exe at $($mpvExe.FullName)"
-          Copy-Item $mpvExe.FullName target/release/mpv.exe
-
-      # wry's WebView2 binding imports webview2loader.dll directly (raw-dylib) -
-      # Windows resolves that import at process launch, so without a real copy
-      # of this DLL next to the exe the installed app can't even start.
-      # webview2-com-sys's build.rs copies it into its own OUT_DIR for linking
-      # but never into target/release/, so cargo-packager never picks it up
-      # unless we grab it ourselves.
-      - name: Bundle WebView2Loader.dll
-        shell: pwsh
-        run: |
-          $loader = Get-ChildItem -Path "target/release/build" -Filter "WebView2Loader.dll" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*\x64\*" } | Select-Object -First 1
-          if (-not $loader) { throw "WebView2Loader.dll not found under target/release/build - did webview2-com-sys's build.rs run?" }
-          Write-Host "Found WebView2Loader.dll at $($loader.FullName)"
-          Copy-Item $loader.FullName target/release/WebView2Loader.dll
-
-      - name: Install cargo-packager
-        run: cargo install cargo-packager --locked
-
-      - name: Build Windows installer
-        run: cargo packager --release --formats nsis
-
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: webtorapp-windows
-          # cargo-packager drops the NSIS installer straight into bundle/,
-          # not a bundle/nsis/ subfolder - the recursive glob also covers
-          # it if a future cargo-packager version nests it after all.
-          path: target/release/bundle/**/*.exe
-
   release:
     name: Publish GitHub Release
-    needs: [linux, windows]
+    needs: [linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -147,12 +80,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: webtorapp-linux
-          path: dist
-
-      - name: Download Windows installer
-        uses: actions/download-artifact@v4
-        with:
-          name: webtorapp-windows
           path: dist
 
       - name: Create GitHub Release

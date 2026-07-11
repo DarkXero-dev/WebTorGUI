@@ -33,6 +33,15 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             output_dir   TEXT NOT NULL,
             routed_files TEXT NOT NULL DEFAULT '[]',
             created_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS theatre (
+            id           TEXT PRIMARY KEY,
+            kind         TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            poster       TEXT NOT NULL,
+            year         TEXT NOT NULL DEFAULT '',
+            imdb_rating  TEXT NOT NULL DEFAULT '',
+            added_at     TEXT NOT NULL
         );",
     )?;
     Ok(())
@@ -83,6 +92,23 @@ mod tests {
             .collect();
 
         for expected in ["info_hash", "title", "source_label", "output_dir", "routed_files", "created_at"] {
+            assert!(columns.contains(&expected.to_string()), "missing column {expected}");
+        }
+    }
+
+    #[test]
+    fn creates_theatre_table_with_expected_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info(theatre);").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        for expected in ["id", "kind", "name", "poster", "year", "imdb_rating", "added_at"] {
             assert!(columns.contains(&expected.to_string()), "missing column {expected}");
         }
     }

@@ -32,6 +32,19 @@ fn default_discover_addons() -> Vec<AddonSource> {
     }]
 }
 
+/// Without a stream source installed, Discover's "Find Sources" button stays
+/// permanently disabled - there's nothing to actually find a torrent with.
+/// Torrentio is the one every Stremio-alike ships with for exactly that
+/// reason, so it's built in rather than something the user has to know to
+/// go add themselves.
+fn default_stream_addons() -> Vec<AddonSource> {
+    vec![AddonSource {
+        name: "Torrentio".to_string(),
+        base_url: "https://torrentio.strem.fun".to_string(),
+        built_in: true,
+    }]
+}
+
 /// What the window's close button should do, remembered only once the user
 /// checks "Never ask again" on the confirmation dialog - otherwise it's
 /// asked every time.
@@ -39,20 +52,6 @@ fn default_discover_addons() -> Vec<AddonSource> {
 pub enum CloseAction {
     MinimizeToTray,
     Quit,
-}
-
-/// Which player backend to use for in-app video playback on Windows - mpv
-/// is the only player `player_windows.rs` can actually embed (via `--wid`),
-/// so anyone who'd rather use a different player gets it launched
-/// externally (its own window) instead of embedded. `None` on
-/// `AppSettings.windows_player_choice` means "never asked yet" and
-/// triggers the first-launch popup; irrelevant on Linux, which always
-/// embeds via mpv/X11 with no choice involved.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowsPlayerChoice {
-    BundledMpv,
-    External(String),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -70,17 +69,12 @@ pub struct AppSettings {
     /// Stremio-compatible addons that resolve real torrent/stream sources
     /// for a title (e.g. Torrentio) - a different addon category than
     /// `discover_addons`, which only provide browsable catalogs.
-    #[serde(default)]
+    #[serde(default = "default_stream_addons")]
     pub stream_addons: Vec<AddonSource>,
     /// What the close button does, if the user has told it to stop asking.
     /// `None` means always show the confirmation dialog.
     #[serde(default)]
     pub remembered_close_action: Option<CloseAction>,
-    /// `None` until the Windows first-launch popup resolves it (or
-    /// forever, on Linux, which never shows that popup and never reads
-    /// this field).
-    #[serde(default)]
-    pub windows_player_choice: Option<WindowsPlayerChoice>,
 }
 
 impl Default for AppSettings {
@@ -98,9 +92,8 @@ impl Default for AppSettings {
             quiet_hours_end: None,
             folder_rules: FolderRules::default(),
             discover_addons: default_discover_addons(),
-            stream_addons: Vec::new(),
+            stream_addons: default_stream_addons(),
             remembered_close_action: None,
-            windows_player_choice: None,
         }
     }
 }
@@ -151,11 +144,25 @@ fn settings_path() -> Result<PathBuf> {
 }
 
 pub fn load_settings() -> AppSettings {
-    settings_path()
+    let mut settings: AppSettings = settings_path()
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // `#[serde(default = "default_stream_addons")]` only fires for a
+    // *missing* key - an existing settings.json saved before Torrentio
+    // became built in has an explicit `"stream_addons": []` on disk, which
+    // deserializes straight past the default. Enforce it here instead, so
+    // it's there for every install regardless of when settings.json was
+    // first written, and reappears even if a user manually edits it out.
+    for addon in default_stream_addons() {
+        if !settings.stream_addons.iter().any(|a| a.base_url == addon.base_url) {
+            settings.stream_addons.push(addon);
+        }
+    }
+
+    settings
 }
 
 pub fn save_settings(settings: &AppSettings) -> Result<()> {
@@ -186,7 +193,6 @@ mod tests {
             discover_addons: default_discover_addons(),
             stream_addons: Vec::new(),
             remembered_close_action: None,
-            windows_player_choice: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
@@ -194,17 +200,6 @@ mod tests {
         assert_eq!(original.threads_per_download, restored.threads_per_download);
         assert_eq!(original.quiet_hours_start, restored.quiet_hours_start);
         assert_eq!(original.folder_rules.video, restored.folder_rules.video);
-    }
-
-    #[test]
-    fn windows_player_choice_round_trips_through_json() {
-        let mut settings = AppSettings::default();
-        settings.windows_player_choice = Some(WindowsPlayerChoice::External("C:\\Players\\vlc.exe".to_string()));
-
-        let json = serde_json::to_string(&settings).unwrap();
-        let restored: AppSettings = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(restored.windows_player_choice, Some(WindowsPlayerChoice::External("C:\\Players\\vlc.exe".to_string())));
     }
 
     #[test]

@@ -2,9 +2,21 @@ use anyhow::{anyhow, Result};
 use base64::Engine;
 use cookie_store::CookieStore;
 use reqwest_cookie_store::CookieStoreMutex;
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 const BASE: &str = "https://webtor.io";
+
+/// SuperTokens' `sFrontToken` cookie (see `front_token_json`/`find_email`
+/// below) turns out to carry only session bookkeeping (session handle,
+/// refresh-token hashes, empty role/permission arrays) - no email, verified
+/// against a real account's decoded token. So the real email comes from
+/// `set_profile_scrape`, fed by the login browser navigating to
+/// webtor.io/profile and scanning its rendered text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ScrapedProfile {
+    email: Option<String>,
+}
 
 /// A logged-in webtor.io session. webtor.io sits behind a Cloudflare bot
 /// challenge that a plain HTTP client cannot pass (verified: identical
@@ -16,6 +28,7 @@ const BASE: &str = "https://webtor.io";
 #[derive(Clone)]
 pub struct WebtorAuth {
     cookie_store: Arc<CookieStoreMutex>,
+    scraped: Arc<Mutex<ScrapedProfile>>,
 }
 
 impl WebtorAuth {
@@ -25,7 +38,16 @@ impl WebtorAuth {
 
     fn from_cookie_store(store: CookieStore) -> Result<Self> {
         let cookie_store = Arc::new(CookieStoreMutex::new(store));
-        Ok(Self { cookie_store })
+        Ok(Self { cookie_store, scraped: Arc::new(Mutex::new(ScrapedProfile::default())) })
+    }
+
+    /// Feeds the login browser's scrape of webtor.io/profile's whole
+    /// rendered text - only overwrites the email when this pass actually
+    /// found one, so a failed/partial scrape doesn't clobber it back to
+    /// unknown.
+    pub fn set_profile_scrape(&self, full_text: Option<&str>) {
+        let Some(email) = full_text.and_then(find_email_in_text) else { return };
+        self.scraped.lock().unwrap().email = Some(email);
     }
 
     /// Imports cookies captured from a real browser session (the
@@ -50,38 +72,25 @@ impl WebtorAuth {
         found
     }
 
-    /// Decodes SuperTokens' `front-token` cookie (a base64 JSON blob it sets
+    /// Decodes SuperTokens' `sFrontToken` cookie (a base64 JSON blob it sets
     /// specifically for frontends to read - not the HttpOnly access token).
+    /// The cookie is `sFrontToken` - "front-token" is only the name of the
+    /// *header* SuperTokens sends it in, not the cookie itself (verified
+    /// against a live session).
     fn front_token_json(&self) -> Option<serde_json::Value> {
         let store = self.cookie_store.lock().unwrap();
-        let front_token = store.iter_any().find(|c| c.name() == "front-token")?.value().to_string();
+        let front_token = store.iter_any().find(|c| c.name() == "sFrontToken")?.value().to_string();
         drop(store);
         let decoded = base64::engine::general_purpose::STANDARD.decode(front_token).ok()?;
         let text = String::from_utf8(decoded).ok()?;
         serde_json::from_str(&text).ok()
     }
 
-    /// Best-effort account label for display. Returns `None` if the
-    /// front-token cookie is missing or doesn't contain anything
-    /// email-shaped.
+    /// Best-effort account label for display: the real email scraped from
+    /// webtor.io/profile after login, falling back to whatever (likely
+    /// nothing) the sFrontToken cookie happens to carry.
     pub fn account_label(&self) -> Option<String> {
-        find_email(&self.front_token_json()?)
-    }
-
-    /// Best-effort subscription tier, read from whatever plan/subscription
-    /// claim (if any) webtor.io's access token happens to carry. Returns
-    /// `None` rather than guessing - callers should show a neutral "signed
-    /// in" state instead of fabricating a tier we can't actually verify.
-    pub fn plan_label(&self) -> Option<String> {
-        find_plan(&self.front_token_json()?)
-    }
-
-    /// Best-effort storage usage (used_bytes, total_bytes), read from
-    /// whatever quota claim (if any) the access token carries. `None` if no
-    /// such claim exists - callers should say usage isn't available rather
-    /// than fabricating numbers.
-    pub fn storage_usage(&self) -> Option<(u64, u64)> {
-        find_storage(&self.front_token_json()?)
+        self.scraped.lock().unwrap().email.clone().or_else(|| find_email(&self.front_token_json()?))
     }
 
     fn serialize(&self) -> Result<String> {
@@ -92,13 +101,36 @@ impl WebtorAuth {
         // saved session ended up empty every time. Need the non-persistent
         // variant to actually keep them.
         cookie_store::serde::json::save_incl_expired_and_nonpersistent(&store, &mut buf).map_err(|e| anyhow!("{e}"))?;
-        Ok(String::from_utf8(buf)?)
+        drop(store);
+        let persisted = PersistedSession {
+            cookies: String::from_utf8(buf)?,
+            scraped: self.scraped.lock().unwrap().clone(),
+        };
+        Ok(serde_json::to_string(&persisted)?)
     }
 
     fn deserialize(json: &str) -> Result<Self> {
-        let store = cookie_store::serde::json::load_all(json.as_bytes()).map_err(|e| anyhow!("{e}"))?;
-        Self::from_cookie_store(store)
+        // Current format wraps the cookie-jar JSON alongside the scraped
+        // email. A session saved before scraping existed is just the raw
+        // cookie-jar JSON with no wrapper - fall back to reading it
+        // directly so an existing login isn't forced to happen again.
+        if let Ok(persisted) = serde_json::from_str::<PersistedSession>(json) {
+            let store = cookie_store::serde::json::load_all(persisted.cookies.as_bytes()).map_err(|e| anyhow!("{e}"))?;
+            let auth = Self::from_cookie_store(store)?;
+            *auth.scraped.lock().unwrap() = persisted.scraped;
+            Ok(auth)
+        } else {
+            let store = cookie_store::serde::json::load_all(json.as_bytes()).map_err(|e| anyhow!("{e}"))?;
+            Self::from_cookie_store(store)
+        }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedSession {
+    cookies: String,
+    #[serde(default)]
+    scraped: ScrapedProfile,
 }
 
 fn session_path() -> Result<std::path::PathBuf> {
@@ -136,6 +168,25 @@ pub fn clear_session() -> Result<()> {
     Ok(())
 }
 
+/// Scans the profile page's plain rendered text (`document.body.innerText`,
+/// no HTML/JSON structure to lean on) for something email-shaped. Manual
+/// scan rather than a regex crate - just walk out from each `@` to the
+/// nearest whitespace/quote/bracket on either side.
+fn find_email_in_text(text: &str) -> Option<String> {
+    for (i, _) in text.match_indices('@') {
+        let before = &text[..i];
+        let after = &text[i..];
+        let is_boundary = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ',' | '<' | '>');
+        let start = before.rfind(is_boundary).map(|p| p + before[p..].chars().next().unwrap().len_utf8()).unwrap_or(0);
+        let end = after.find(is_boundary).unwrap_or(after.len());
+        let candidate = &text[start..i + end];
+        if candidate.len() > 5 && candidate.matches('@').count() == 1 && candidate.contains('.') && !candidate.starts_with('@') && !candidate.ends_with('@') {
+            return Some(candidate.trim_matches('.').to_string());
+        }
+    }
+    None
+}
+
 fn find_email(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) if s.contains('@') && s.contains('.') => Some(s.clone()),
@@ -143,47 +194,6 @@ fn find_email(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Array(items) => items.iter().find_map(find_email),
         _ => None,
     }
-}
-
-const PLAN_KEYS: &[&str] = &["plan", "subscription", "tier", "subscriptionTier", "subscriptionStatus", "accountType"];
-
-fn find_plan(value: &serde_json::Value) -> Option<String> {
-    if let serde_json::Value::Object(map) = value {
-        for key in PLAN_KEYS {
-            if let Some(v) = map.get(*key) {
-                match v {
-                    serde_json::Value::String(s) if !s.is_empty() => return Some(s.clone()),
-                    serde_json::Value::Bool(b) if *key == "premium" || key.to_lowercase().contains("premium") => {
-                        return Some(if *b { "Premium".to_string() } else { "Free".to_string() });
-                    }
-                    _ => {}
-                }
-            }
-        }
-        return map.values().find_map(find_plan);
-    }
-    if let serde_json::Value::Array(items) = value {
-        return items.iter().find_map(find_plan);
-    }
-    None
-}
-
-const STORAGE_USED_KEYS: &[&str] = &["storageUsed", "usedBytes", "storageUsage", "bytesUsed"];
-const STORAGE_TOTAL_KEYS: &[&str] = &["storageLimit", "storageQuota", "totalBytes", "quota", "storageTotal"];
-
-fn find_storage(value: &serde_json::Value) -> Option<(u64, u64)> {
-    if let serde_json::Value::Object(map) = value {
-        let used = STORAGE_USED_KEYS.iter().find_map(|k| map.get(*k)).and_then(|v| v.as_u64());
-        let total = STORAGE_TOTAL_KEYS.iter().find_map(|k| map.get(*k)).and_then(|v| v.as_u64());
-        if let (Some(u), Some(t)) = (used, total) {
-            return Some((u, t));
-        }
-        return map.values().find_map(find_storage);
-    }
-    if let serde_json::Value::Array(items) = value {
-        return items.iter().find_map(find_storage);
-    }
-    None
 }
 
 #[cfg(test)]

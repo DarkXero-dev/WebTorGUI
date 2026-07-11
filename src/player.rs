@@ -32,13 +32,20 @@ pub struct EmbeddedPlayer {
     ipc_buf: Vec<u8>,
     ipc_path: String,
     hidden: bool,
+    /// Populated from mpv's own IPC property-change events (`media-title`,
+    /// `duration`, `width`, `height`) - so Now Playing can show the file's
+    /// actual metadata instead of just its raw path/URL. `media-title` is
+    /// mpv's own best title (embedded tag if the file has one, otherwise
+    /// its filename) - not something we derive ourselves.
+    media_title: Option<String>,
+    duration_secs: Option<f64>,
+    width: Option<i64>,
+    height: Option<i64>,
 }
 
 impl EmbeddedPlayer {
-    /// `parent_handle` is the owning window's raw ID widened to `isize` -
-    /// an X11 XID is 32-bit, but the Windows implementation's `HWND` is
-    /// pointer-sized, so `isize` is the common type the caller in
-    /// `ui/app.rs` can hold regardless of platform.
+    /// `parent_handle` is the owning window's raw X11 XID, widened to
+    /// `isize` (XIDs are 32-bit) to match what the caller in `ui/app.rs` holds.
     pub fn spawn(parent_handle: isize, x: i32, y: i32, w: u32, h: u32, source: &str) -> Result<Self> {
         let parent_xid = parent_handle as u32;
         let (conn, screen_num) = x11rb::connect(None).map_err(|e| anyhow!("no X11 connection: {e}"))?;
@@ -86,11 +93,6 @@ impl EmbeddedPlayer {
                 "--really-quiet",
                 "--force-window=yes",
                 "--keep-open=yes",
-                // Crop-to-fill: scales the video to cover the whole embedded
-                // window with no letterbox bars, while keeping the source's
-                // aspect ratio (unlike --keepaspect=no, which stretches and
-                // distorts the picture).
-                "--panscan=1.0",
                 // mpv's built-in on-screen controller defaults to a scale
                 // tuned for a full monitor - inside our small embedded
                 // window its buttons/seekbar are nearly illegible, so scale
@@ -132,8 +134,16 @@ impl EmbeddedPlayer {
             ipc_buf: Vec::new(),
             ipc_path,
             hidden: false,
+            media_title: None,
+            duration_secs: None,
+            width: None,
+            height: None,
         };
         player.send_ipc(r#"{"command": ["observe_property", 1, "fullscreen"]}"#);
+        player.send_ipc(r#"{"command": ["observe_property", 2, "media-title"]}"#);
+        player.send_ipc(r#"{"command": ["observe_property", 3, "duration"]}"#);
+        player.send_ipc(r#"{"command": ["observe_property", 4, "width"]}"#);
+        player.send_ipc(r#"{"command": ["observe_property", 5, "height"]}"#);
         Ok(player)
     }
 
@@ -145,7 +155,11 @@ impl EmbeddedPlayer {
 
     /// Non-blocking check for mpv-reported fullscreen state changes (its OSC
     /// fullscreen button or the `f` key). Returns `Some(true/false)` the
-    /// frame that state changes, `None` otherwise.
+    /// frame that state changes, `None` otherwise. Also drains and applies
+    /// every other observed property-change on the same socket
+    /// (`media-title`/`duration`/`width`/`height`, see `media_title` et al)
+    /// - the IPC socket only has one reader, so this is the only place
+    /// anything is allowed to read from it.
     pub fn poll_fullscreen_toggle(&mut self) -> Option<bool> {
         let stream = self.ipc.as_mut()?;
         let mut buf = [0u8; 4096];
@@ -153,26 +167,56 @@ impl EmbeddedPlayer {
             Ok(0) | Err(_) => None,
             Ok(n) => {
                 self.ipc_buf.extend_from_slice(&buf[..n]);
-                let mut result = None;
+                let mut fullscreen_result = None;
                 while let Some(pos) = self.ipc_buf.iter().position(|&b| b == b'\n') {
                     let line: Vec<u8> = self.ipc_buf.drain(..=pos).collect();
                     let Ok(text) = std::str::from_utf8(&line) else { continue };
                     let Ok(json) = serde_json::from_str::<serde_json::Value>(text.trim()) else { continue };
-                    if json.get("event").and_then(|e| e.as_str()) == Some("property-change")
-                        && json.get("name").and_then(|n| n.as_str()) == Some("fullscreen")
-                    {
-                        if let Some(v) = json.get("data").and_then(|d| d.as_bool()) {
-                            result = Some(v);
+                    if json.get("event").and_then(|e| e.as_str()) != Some("property-change") {
+                        continue;
+                    }
+                    let Some(name) = json.get("name").and_then(|n| n.as_str()) else { continue };
+                    let data = json.get("data");
+                    match name {
+                        "fullscreen" => {
+                            if let Some(v) = data.and_then(|d| d.as_bool()) {
+                                fullscreen_result = Some(v);
+                            }
                         }
+                        "media-title" => self.media_title = data.and_then(|d| d.as_str()).map(str::to_string),
+                        "duration" => self.duration_secs = data.and_then(|d| d.as_f64()),
+                        "width" => self.width = data.and_then(|d| d.as_i64()),
+                        "height" => self.height = data.and_then(|d| d.as_i64()),
+                        _ => {}
                     }
                 }
-                result
+                fullscreen_result
             }
         }
     }
 
     pub fn is_native_fullscreen(&self) -> bool {
         self.is_native_fullscreen
+    }
+
+    /// mpv's own best title for what's playing - an embedded tag (e.g. an
+    /// MKV's title metadata) if the file has one, otherwise just its
+    /// filename. `None` until mpv has actually reported it (a moment after
+    /// playback starts).
+    pub fn media_title(&self) -> Option<&str> {
+        self.media_title.as_deref()
+    }
+
+    /// Video resolution as `(width, height)`, once mpv has reported both.
+    pub fn resolution(&self) -> Option<(i64, i64)> {
+        Some((self.width?, self.height?))
+    }
+
+    /// Total duration, formatted as `h:mm:ss` (or `m:ss` under an hour).
+    pub fn duration_label(&self) -> Option<String> {
+        let total = self.duration_secs?.round() as i64;
+        let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+        Some(if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") })
     }
 
     /// Reparent the embedded window to the root window and size it to cover
@@ -258,8 +302,7 @@ impl Drop for EmbeddedPlayer {
 }
 
 /// Extract the X11 window ID of our own app window, if the current backend
-/// exposes one (X11/XWayland via Xlib or Xcb raw-window-handle variants),
-/// widened to `isize` to match the Windows implementation's `HWND`.
+/// exposes one (X11/XWayland via Xlib or Xcb raw-window-handle variants).
 pub fn own_window_handle(handle: raw_window_handle::RawWindowHandle) -> Option<isize> {
     use raw_window_handle::RawWindowHandle;
     match handle {
